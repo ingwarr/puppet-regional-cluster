@@ -88,10 +88,14 @@ bootstrap:
     - data-checksums
 
   pg_hba:
+    - local all postgres peer
+    - local all all peer
+
     - host all all 127.0.0.1/32 scram-sha-256
     - host all all ${PG01_IP}/32 scram-sha-256
     - host all all ${PG02_IP}/32 scram-sha-256
     - host all all ${PG03_IP}/32 scram-sha-256
+    - host all all ${HA01_IP}/32 scram-sha-256
 
     - host replication ${POSTGRES_REPLICATION_USER} ${PG01_IP}/32 scram-sha-256
     - host replication ${POSTGRES_REPLICATION_USER} ${PG02_IP}/32 scram-sha-256
