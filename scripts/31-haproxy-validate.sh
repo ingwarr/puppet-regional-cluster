@@ -76,7 +76,7 @@ if [[ -n "${RESULT}" ]]; then
     fi
 
     case "${SERVER_IP}" in
-        "${PG01_IP}"|"${PG02_IP}"|"${PG03_IP}")
+        "${PG01_IP}"|"${PG02_IP}"|"${PG03_IP}"|"{PG01_IP}/32"|"${PG02_IP}/32"|"${PG03_IP}/32")
             pass "Backend belongs to the Patroni cluster."
             ;;
         *)
