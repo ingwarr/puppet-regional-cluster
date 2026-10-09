@@ -4,6 +4,17 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
+export PATH="/opt/puppetlabs/bin:${PATH}"
+
+PUPPET="/opt/puppetlabs/bin/puppet"
+PUPPETSERVER="/opt/puppetlabs/bin/puppetserver"
+
+[[ -x "${PUPPET}" ]] ||
+    die "Puppet executable not found"
+
+[[ -x "${PUPPETSERVER}" ]] ||
+    die "Puppetserver executable not found"
+
 require_root
 load_inventory "${1:?Usage: $0 inventory/lab01.env}"
 
@@ -43,8 +54,6 @@ systemctl enable --now firewalld
 
 firewall-cmd --permanent --add-port=8140/tcp
 firewall-cmd --reload
-
-PUPPET="/opt/puppetlabs/bin/puppet"
 
 log "Configuring CA identity"
 
