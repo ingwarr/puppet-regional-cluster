@@ -2,6 +2,8 @@
 
 set -Eeuo pipefail
 
+export PATH="/opt/puppetlabs/bin:/usr/pgsql-16/bin:${PATH}"
+
 log()
 {
     printf '[INFO] %s\n' "$*"
