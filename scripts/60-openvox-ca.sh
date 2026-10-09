@@ -94,7 +94,7 @@ fi
 
 log "Initializing CA"
 
-/opt/puppetlabs/bin/puppetserver ca setup
+"${PUPPETSERVER}" ca setup
 
 log "Starting CA service"
 
