@@ -187,9 +187,15 @@ case "${MODE}" in
     [[ -x "${GUARD}" && -f "${DROPIN}" ]] || die "systemd guard missing"
     "${GUARD}" || die "Mount guard failed"
     systemctl is-active --quiet puppetserver || die "CA service inactive"
-    CA_CERT="$(${PUPPET} config print cacert --section server)"
-    curl --fail --silent --show-error --cacert "${CA_CERT}" \
-      "https://${OPENVOX_CA_SERVICE_NAME}:8140/puppet-ca/v1/certificate/ca" >/dev/null \
+    # root_squash prevents root from reading CA files on NFS. The CA
+    # service account must perform the TLS check with the mounted CA cert.
+    [[ -n "${OPENVOX_CA_SERVICE_NAME:-}" ]] || die "OPENVOX_CA_SERVICE_NAME is not set"
+    runuser -u puppet -- test -r "${CADIR}/ca_crt.pem" \
+      || die "CA certificate not readable by puppet"
+    runuser -u puppet -- curl --fail --silent --show-error \
+      --cacert "${CADIR}/ca_crt.pem" \
+      "https://${OPENVOX_CA_SERVICE_NAME}:8140/puppet-ca/v1/certificate/ca" \
+      --output /dev/null \
       || die "CA HTTPS check failed"
     log "VALIDATION PASSED: CA state on NFS, identity intact, HTTPS healthy"
     ;;
