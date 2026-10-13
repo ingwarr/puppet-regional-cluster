@@ -54,6 +54,7 @@ GUARD_SCRIPT
 RequiresMountsFor=${CADIR}
 After=network-online.target
 Wants=network-online.target
+ConditionPathIsMountPoint=${CADIR}
 [Service]
 ExecStartPre=${GUARD}
 DROPIN_FILE

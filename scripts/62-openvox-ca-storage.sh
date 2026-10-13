@@ -32,6 +32,18 @@ check_mount() {
   [[ "$(findmnt -n -o SOURCE --mountpoint "${where}")" == "${NFS_SOURCE}" ]] || die "Unexpected NFS source at ${where}"
 }
 
+# NFS uses root_squash: inspect the export as the service account.
+# Distinguish an empty export from a failed find invocation.
+check_empty_nfs() {
+  local output rc
+  if output="$(runuser -u puppet -- find "${STAGE}" -mindepth 1 -print -quit 2>&1)"; then
+    [[ -z "${output}" ]] || die "NFS export is not empty: ${output}"
+  else
+    rc=$?
+    die "Cannot inspect NFS export as puppet (exit=${rc}): ${output}"
+  fi
+}
+
 check_active_ca() {
   [[ -s "${CADIR}/ca_crt.pem" && -s "${CADIR}/ca_key.pem" ]] || die "CA key/cert missing"
   local c k
@@ -56,6 +68,7 @@ GUARD_SCRIPT
 RequiresMountsFor=${CADIR}
 After=network-online.target
 Wants=network-online.target
+ConditionPathIsMountPoint=${CADIR}
 [Service]
 ExecStartPre=${GUARD}
 DROPIN_FILE
@@ -67,9 +80,8 @@ case "${MODE}" in
     systemctl is-active --quiet puppetserver || die "Active CA service is not running"
     ! mountpoint -q "${CADIR}" || die "CA directory already mounted"
     check_mount "${STAGE}"
-    [[ -z "$(find "${STAGE}" -mindepth 1 -print -quit)" ]] || die "NFS export not empty"
+    check_empty_nfs
     [[ "$(stat -c '%u:%g' "${STAGE}")" == 52:52 ]] || die "NFS owner mismatch"
-    [[ -w "${STAGE}" ]] || : # root_squash means root's write test is not meaningful
     runuser -u puppet -- /usr/bin/test -w "${STAGE}" || die "puppet cannot write NFS"
     command -v rsync >/dev/null || die "rsync not installed"
     check_active_ca >/dev/null
@@ -79,7 +91,7 @@ case "${MODE}" in
     systemctl is-active --quiet puppetserver || die "Expected active CA before migration"
     ! mountpoint -q "${CADIR}" || die "CA already mounted"
     check_mount "${STAGE}"
-    [[ -z "$(find "${STAGE}" -mindepth 1 -print -quit)" ]] || die "NFS export is not empty"
+    check_empty_nfs
     [[ "$(stat -c '%u:%g' "${STAGE}")" == 52:52 ]] || die "NFS owner mismatch"
     runuser -u puppet -- /usr/bin/test -w "${STAGE}" || die "puppet cannot write NFS"
     command -v rsync >/dev/null || die "rsync not installed"
