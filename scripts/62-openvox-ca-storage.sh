@@ -18,6 +18,9 @@ BACKUP_ROOT="/root/openvox-ca-migration"
 GUARD="/usr/local/sbin/openvox-ca-mount-guard"
 DROPIN="/etc/systemd/system/puppetserver.service.d/20-ca-nfs.conf"
 EXPECTED="${BACKUP_ROOT}/ca-fingerprint.sha256"
+FSTAB_LINE="${NFS_SOURCE} ${CADIR} nfs4 rw,vers=4.2,hard,_netdev 0 0"
+MIGRATION_STARTED=0
+MIGRATION_COMMITTED=0
 
 [[ "$(hostname -s)" == "${CA01_NAME}" ]] || die "Run only on ${CA01_NAME}"
 [[ "${MODE}" == --check || "${MODE}" == --migrate || "${MODE}" == --validate ]] || die "Unknown mode ${MODE}"
@@ -75,6 +78,34 @@ DROPIN_FILE
   systemctl daemon-reload
 }
 
+# Roll back only modifications made by this invocation. Keep NFS data and backups.
+rollback_migration() {
+  local rc="$1"
+  trap - EXIT
+  [[ "${MIGRATION_STARTED}" == 1 && "${MIGRATION_COMMITTED}" == 0 ]] || exit "${rc}"
+  warn "Migration failed (exit=${rc}); attempting local CA rollback"
+  systemctl stop puppetserver || true
+  if mountpoint -q "${CADIR}"; then
+    umount "${CADIR}" || { warn "Cannot unmount CA NFS; manual intervention required; service remains stopped"; exit "${rc}"; }
+  fi
+  # Only remove our own exact fstab entry, not unrelated mounts.
+  if [[ -f /etc/fstab ]]; then
+    awk -v target="${FSTAB_LINE}" '$0 != target' /etc/fstab > /etc/fstab.openvox-tmp && cat /etc/fstab.openvox-tmp > /etc/fstab && rm -f /etc/fstab.openvox-tmp || true
+  fi
+  rm -f "${DROPIN}" "${GUARD}"
+  systemctl daemon-reload || true
+  if [[ -d "${CADIR}.before-nfs-migration" ]]; then
+    [[ ! -e "${CADIR}" ]] || rmdir "${CADIR}" || { warn "CA mountpoint not empty; manual intervention required"; exit "${rc}"; }
+    mv "${CADIR}.before-nfs-migration" "${CADIR}" || { warn "Cannot restore local CA directory"; exit "${rc}"; }
+  fi
+  if [[ -s "${CADIR}/ca_crt.pem" && -s "${CADIR}/ca_key.pem" ]]; then
+    systemctl start puppetserver || warn "Local CA restored but service did not start; investigate"
+  else
+    warn "Local CA files missing; service intentionally stopped"
+  fi
+  exit "${rc}"
+}
+
 case "${MODE}" in
   --check)
     systemctl is-active --quiet puppetserver || die "Active CA service is not running"
@@ -96,27 +127,33 @@ case "${MODE}" in
     runuser -u puppet -- /usr/bin/test -w "${STAGE}" || die "puppet cannot write NFS"
     command -v rsync >/dev/null || die "rsync not installed"
     [[ ! -e "${BACKUP_ROOT}" ]] || die "Migration backup directory already exists"
-    grep -Eq "^[^#]*[[:space:]]${CADIR}[[:space:]]" /etc/fstab && die "fstab already has cadir mount"
+    [[ ! -e "${CADIR}.before-nfs-migration" ]] || die "Previous migration directory exists"
+    [[ ! -e "${DROPIN}" && ! -e "${GUARD}" ]] || die "Existing CA guard detected"
+    ! grep -Eq "^[^#]*[[:space:]]${CADIR}[[:space:]]" /etc/fstab || die "fstab already has cadir mount"
     log "Stopping active CA for consistent migration"
+    MIGRATION_STARTED=1
+    trap 'rollback_migration "$?"' EXIT
     systemctl stop puppetserver
-    systemctl is-active --quiet puppetserver && die "Cannot stop puppetserver"
+    ! systemctl is-active --quiet puppetserver || die "Cannot stop puppetserver"
     install -d -m 0700 "${BACKUP_ROOT}"
     cp -a "${CADIR}" "${BACKUP_ROOT}/ca-local"
     check_active_ca > "${EXPECTED}"
-    log "Copying CA state to NFS as puppet (no deletion of local copy)"
-    runuser -u puppet -- rsync -a --checksum "${CADIR}/" "${STAGE}/" || die "Copy failed; CA remains stopped; local copy retained"
-    runuser -u puppet -- rsync -a --checksum --dry-run --itemize-changes "${CADIR}/" "${STAGE}/" | tee "${BACKUP_ROOT}/rsync-diff.txt"
-    [[ ! -s "${BACKUP_ROOT}/rsync-diff.txt" ]] || die "Copy mismatch; CA remains stopped"
+    log "Copying CA state to NFS as puppet (local backup retained)"
+    runuser -u puppet -- rsync -a --checksum "${CADIR}/" "${STAGE}/" || die "NFS copy failed"
+    runuser -u puppet -- rsync -a --checksum --dry-run --itemize-changes "${CADIR}/" "${STAGE}/" > "${BACKUP_ROOT}/rsync-diff.txt" || die "NFS verification failed"
+    [[ ! -s "${BACKUP_ROOT}/rsync-diff.txt" ]] || die "NFS copy differs from local CA"
     mv "${CADIR}" "${CADIR}.before-nfs-migration"
     install -d -m 0750 -o puppet -g puppet "${CADIR}"
-    printf '%s\n' "${NFS_SOURCE} ${CADIR} nfs4 rw,vers=4.2,hard,_netdev 0 0" >> /etc/fstab
+    printf '%s\n' "${FSTAB_LINE}" >> /etc/fstab
     systemctl daemon-reload
-    mount "${CADIR}" || die "NFS mount failed; CA remains stopped; see recovery notes"
+    mount "${CADIR}" || die "NFS mount failed"
     check_mount "${CADIR}"
-    [[ "$(check_active_ca)" == "$(cat "${EXPECTED}")" ]] || die "CA identity changed; CA remains stopped"
+    [[ "$(check_active_ca)" == "$(cat "${EXPECTED}")" ]] || die "CA identity changed"
     install_guard
-    systemctl start puppetserver || die "Service start failed; CA state preserved"
+    systemctl start puppetserver || die "Service start failed"
     systemctl is-active --quiet puppetserver || die "Service inactive after start"
+    MIGRATION_COMMITTED=1
+    trap - EXIT
     log "MIGRATION COMPLETED. Local CA backup retained. Run --validate."
     ;;
   --validate)
