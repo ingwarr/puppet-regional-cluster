@@ -47,13 +47,34 @@ check_empty_nfs() {
   fi
 }
 
-check_active_ca() {
-  [[ -s "${CADIR}/ca_crt.pem" && -s "${CADIR}/ca_key.pem" ]] || die "CA key/cert missing"
-  local c k
-  c="$(openssl x509 -in "${CADIR}/ca_crt.pem" -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum | cut -d' ' -f1)"
-  k="$(openssl pkey -in "${CADIR}/ca_key.pem" -pubout -outform DER | sha256sum | cut -d' ' -f1)"
-  [[ "${c}" == "${k}" ]] || die "CA key and cert mismatch"
+# Run ALL reads of CA private state as puppet: NFS root_squash denies root.
+ca_identity() {
+  local path="$1" c k
+  runuser -u puppet -- test -s "${path}/ca_crt.pem" || return 1
+  runuser -u puppet -- test -s "${path}/ca_key.pem" || return 1
+  c="$(runuser -u puppet -- openssl x509 -in "${path}/ca_crt.pem" -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum | awk '{print $1}')" || return 1
+  k="$(runuser -u puppet -- openssl pkey -in "${path}/ca_key.pem" -pubout -outform DER | sha256sum | awk '{print $1}')" || return 1
+  [[ -n "${c}" && "${c}" == "${k}" ]] || return 1
   printf '%s\n' "${c}"
+}
+
+verify_copy() {
+  local diff
+  diff="$(mktemp /root/openvox-ca-rsync.XXXXXX)"
+  if ! runuser -u puppet -- rsync -a --checksum --delete --dry-run --itemize-changes "${CADIR}/" "${STAGE}/" > "${diff}"; then
+    rm -f "${diff}"
+    die "NFS verification failed"
+  fi
+  if [[ -s "${diff}" ]]; then
+    cat "${diff}" >&2
+    rm -f "${diff}"
+    die "NFS differs from local CA"
+  fi
+  rm -f "${diff}"
+  local local_id nfs_id
+  local_id="$(ca_identity "${CADIR}")" || die "Local CA key/cert unreadable or mismatched"
+  nfs_id="$(ca_identity "${STAGE}")" || die "NFS CA key/cert unreadable or mismatched"
+  [[ "${local_id}" == "${nfs_id}" ]] || die "CA identity differs on NFS"
 }
 
 install_guard() {
@@ -111,22 +132,20 @@ case "${MODE}" in
     systemctl is-active --quiet puppetserver || die "Active CA service is not running"
     ! mountpoint -q "${CADIR}" || die "CA directory already mounted"
     check_mount "${STAGE}"
-    check_empty_nfs
     [[ "$(stat -c '%u:%g' "${STAGE}")" == 52:52 ]] || die "NFS owner mismatch"
     runuser -u puppet -- /usr/bin/test -w "${STAGE}" || die "puppet cannot write NFS"
     command -v rsync >/dev/null || die "rsync not installed"
-    check_active_ca >/dev/null
+    ca_identity "${CADIR}" >/dev/null || die "Cannot validate local CA"
     log "CHECK PASSED: ready for maintenance window"
     ;;
   --migrate)
     systemctl is-active --quiet puppetserver || die "Expected active CA before migration"
     ! mountpoint -q "${CADIR}" || die "CA already mounted"
     check_mount "${STAGE}"
-    check_empty_nfs
     [[ "$(stat -c '%u:%g' "${STAGE}")" == 52:52 ]] || die "NFS owner mismatch"
     runuser -u puppet -- /usr/bin/test -w "${STAGE}" || die "puppet cannot write NFS"
     command -v rsync >/dev/null || die "rsync not installed"
-    [[ ! -e "${BACKUP_ROOT}" ]] || die "Migration backup directory already exists"
+    [[ ! -e "${BACKUP_ROOT}" ]] || die "Migration backup directory already exists; inspect previous rollback artifacts before retry"
     [[ ! -e "${CADIR}.before-nfs-migration" ]] || die "Previous migration directory exists"
     [[ ! -e "${DROPIN}" && ! -e "${GUARD}" ]] || die "Existing CA guard detected"
     ! grep -Eq "^[^#]*[[:space:]]${CADIR}[[:space:]]" /etc/fstab || die "fstab already has cadir mount"
@@ -137,18 +156,18 @@ case "${MODE}" in
     ! systemctl is-active --quiet puppetserver || die "Cannot stop puppetserver"
     install -d -m 0700 "${BACKUP_ROOT}"
     cp -a "${CADIR}" "${BACKUP_ROOT}/ca-local"
-    check_active_ca > "${EXPECTED}"
+    ca_identity "${CADIR}" > "${EXPECTED}" || die "Cannot validate local CA"
     log "Copying CA state to NFS as puppet (local backup retained)"
     runuser -u puppet -- rsync -a --checksum "${CADIR}/" "${STAGE}/" || die "NFS copy failed"
-    runuser -u puppet -- rsync -a --checksum --dry-run --itemize-changes "${CADIR}/" "${STAGE}/" > "${BACKUP_ROOT}/rsync-diff.txt" || die "NFS verification failed"
-    [[ ! -s "${BACKUP_ROOT}/rsync-diff.txt" ]] || die "NFS copy differs from local CA"
+    verify_copy
     mv "${CADIR}" "${CADIR}.before-nfs-migration"
     install -d -m 0750 -o puppet -g puppet "${CADIR}"
     printf '%s\n' "${FSTAB_LINE}" >> /etc/fstab
     systemctl daemon-reload
     mount "${CADIR}" || die "NFS mount failed"
     check_mount "${CADIR}"
-    [[ "$(check_active_ca)" == "$(cat "${EXPECTED}")" ]] || die "CA identity changed"
+    ACTUAL="$(ca_identity "${CADIR}")" || die "Cannot read mounted CA identity as puppet"
+    [[ "${ACTUAL}" == "$(cat "${EXPECTED}")" ]] || die "CA identity changed"
     install_guard
     systemctl start puppetserver || die "Service start failed"
     systemctl is-active --quiet puppetserver || die "Service inactive after start"
@@ -159,7 +178,8 @@ case "${MODE}" in
   --validate)
     check_mount "${CADIR}"
     [[ -f "${EXPECTED}" ]] || die "Baseline fingerprint missing"
-    [[ "$(check_active_ca)" == "$(cat "${EXPECTED}")" ]] || die "CA fingerprint mismatch"
+    ACTUAL="$(ca_identity "${CADIR}")" || die "Cannot read CA identity as puppet"
+    [[ "${ACTUAL}" == "$(cat "${EXPECTED}")" ]] || die "CA fingerprint mismatch"
     [[ -x "${GUARD}" && -f "${DROPIN}" ]] || die "systemd guard missing"
     "${GUARD}" || die "Mount guard failed"
     systemctl is-active --quiet puppetserver || die "CA service inactive"

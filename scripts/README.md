@@ -1,14 +1,15 @@
-# OpenVox CA NFS scripts v3 (lab)
+# OpenVox CA NFS migration v4 — diagnostic candidate
 
-Run on ca01 after off-host encrypted backup, maintenance window, and a successful `--check`:
+Fixes the `root_squash` failure by reading CA private material as the `puppet` service user (UID 52). CA certificate/key public-key identities are compared before switching and after mounting. NFS copy is checked using rsync checksum dry run, including unexpected extra files.
 
-```bash
-sudo ./scripts/62-openvox-ca-storage.sh inventory/lab01.env --check
-sudo ./scripts/62-openvox-ca-storage.sh inventory/lab01.env --migrate
-sudo ./scripts/62-openvox-ca-storage.sh inventory/lab01.env --validate
-sudo ./scripts/61-openvox-ca-validate.sh inventory/lab01.env
-```
+**Do not run --migrate yet.** The failed v3 attempt may have left `/root/openvox-ca-migration`, a partially populated NFS export, and other rollback artifacts. The v4 script intentionally refuses to overwrite an existing backup directory. Inspect these before a new migration; never delete backups or CA files automatically.
 
-Version 3 adds an EXIT-trap rollback to `62 --migrate`. On a migration failure, it attempts to unmount CA NFS, restore the original local CA directory, remove the script's mount/guard settings, and restart the original service. If NFS cannot be unmounted or local CA state cannot be restored, it leaves the service stopped for manual recovery. The NFS copy and backup are retained. **This is not a fully transactional rollback and has not been tested on your VMs.** Never rerun `--migrate` blindly after a failure.
+1. On ca01: `bash -n scripts/62-openvox-ca-storage.sh`
+2. Run `sudo ./scripts/61-openvox-ca-validate.sh inventory/lab01.env`.
+3. Run `sudo ./scripts/62-openvox-ca-storage.sh inventory/lab01.env --check`.
+4. Inspect `sudo ls -la /root/openvox-ca-migration` and `sudo -u puppet find /mnt/openvox-ca-test -mindepth 1 -maxdepth 2 -printf '%P\n'`.
+5. Check any leftover fstab entries/drop-ins before scheduling migration.
 
-Before migration, confirm no issuance/revocation is in progress and copy a protected backup **off the CA VM**. `ca02` must stay inactive. NFS is still a single point of failure in the lab. `63` is unchanged from v2 and is not a failover mechanism. Verify the `puppetserver` systemd drop-in after migration. Do not start `ca02` until a fencing procedure and its separate TLS host identity are ready.
+`63-openvox-ca-standby.sh` is carried over from v3, not yet validated for this new design; do not execute it.
+
+Note: `ca_identity` computes the SHA256 of the DER-encoded public key extracted independently from the CA certificate and private key. This is *not* the certificate fingerprint; it is an identity consistency check.
