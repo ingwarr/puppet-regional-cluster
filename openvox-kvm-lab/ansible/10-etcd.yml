@@ -1,0 +1,75 @@
+---
+- name: Install and bootstrap etcd cluster
+  hosts: postgresql
+  become: true
+  gather_facts: true
+  roles:
+    - etcd
+
+- name: Validate etcd cluster
+  hosts: postgresql
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Wait until all three endpoints are healthy
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/etcdctl
+          - "--endpoints={{ groups['postgresql'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '^(.*)$', 'http://\\1:' ~ (etcd_client_port | string)) | join(',') }}"
+          - endpoint
+          - health
+      environment:
+        ETCDCTL_API: '3'
+      register: etcd_health
+      retries: 20
+      delay: 3
+      until:
+        - etcd_health.rc == 0
+        - (etcd_health.stdout | regex_findall('is healthy') | length) == (groups['postgresql'] | length)
+      changed_when: false
+      run_once: true
+
+    - name: Show etcd endpoint health
+      ansible.builtin.debug:
+        var: etcd_health.stdout_lines
+      run_once: true
+
+    - name: Check member list
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/etcdctl
+          - member
+          - list
+          - --write-out=json
+      environment:
+        ETCDCTL_API: '3'
+        ETCDCTL_ENDPOINTS: "{{ groups['postgresql'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '^(.*)$', 'http://\\1:' ~ (etcd_client_port | string)) | join(',') }}"
+      register: member_list
+      changed_when: false
+      run_once: true
+
+    - name: Assert expected membership
+      ansible.builtin.assert:
+        that:
+          - (member_list.stdout | from_json).members | length == 3
+          - ((member_list.stdout | from_json).members | map(attribute='name') | list | sort) == (groups['postgresql'] | sort)
+      run_once: true
+
+    - name: Display endpoint status
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/etcdctl
+          - endpoint
+          - status
+          - --write-out=table
+      environment:
+        ETCDCTL_API: '3'
+        ETCDCTL_ENDPOINTS: "{{ groups['postgresql'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '^(.*)$', 'http://\\1:' ~ (etcd_client_port | string)) | join(',') }}"
+      register: endpoint_status
+      changed_when: false
+      run_once: true
+
+    - name: Show endpoint status
+      ansible.builtin.debug:
+        var: endpoint_status.stdout_lines
+      run_once: true

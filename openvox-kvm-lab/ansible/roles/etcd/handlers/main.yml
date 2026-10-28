@@ -1,0 +1,9 @@
+---
+- name: Restart etcd
+  ansible.builtin.systemd_service:
+    name: etcd
+    state: restarted
+    daemon_reload: true
+  # Never restart a freshly bootstrapped cluster during its first playbook run.
+  when: etcd_existing_member.stat.exists
+  throttle: 1

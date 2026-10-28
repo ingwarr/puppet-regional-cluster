@@ -1,0 +1,26 @@
+---
+- name: Prevent cloud-init from overwriting Ansible-managed hosts
+  hosts: all
+  become: true
+
+  tasks:
+    - name: Disable cloud-init hosts update module
+      ansible.builtin.lineinfile:
+        path: /etc/cloud/cloud.cfg
+        regexp: '^\s*-\s*update_etc_hosts\s*$'
+        state: absent
+
+    - name: Install static hosts file
+      ansible.builtin.copy:
+        dest: /etc/hosts
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # Managed by Ansible - OpenVox KVM lab
+          127.0.0.1 localhost localhost.localdomain
+          ::1 localhost localhost.localdomain
+
+          {% for host in groups['all'] %}
+          {{ hostvars[host].ansible_host }} {{ host }}.lab.example {{ host }}
+          {% endfor %}

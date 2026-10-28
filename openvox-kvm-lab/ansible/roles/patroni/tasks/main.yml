@@ -1,0 +1,97 @@
+---
+- name: Require credentials and three PostgreSQL hosts
+  ansible.builtin.assert:
+    that:
+      - groups['postgresql'] | length == 3
+      - patroni_superuser_password is defined
+      - patroni_replication_password is defined
+      - patroni_superuser_password | length > 0
+      - patroni_replication_password | length > 0
+      - patroni_superuser_password != 'CHANGE_ME_POSTGRES'
+      - patroni_replication_password != 'CHANGE_ME_REPLICATION'
+    fail_msg: 'Set patroni_superuser_password and patroni_replication_password via Ansible Vault.'
+  no_log: true
+
+- name: Install Python prerequisites
+  ansible.builtin.dnf:
+    name:
+      - python3
+      - python3-pip
+    state: present
+
+- name: Ensure Patroni virtual environment packages installed
+  ansible.builtin.pip:
+    name:
+      - 'patroni[etcd3]'
+      - 'psycopg[binary]'
+    virtualenv: /opt/patroni
+    virtualenv_command: /usr/bin/python3 -m venv
+    state: present
+
+- name: Ensure PostgreSQL socket directory exists
+  ansible.builtin.file:
+    path: /var/run/postgresql
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: '2775'
+
+- name: Ensure Patroni config directory exists
+  ansible.builtin.file:
+    path: /etc/patroni
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: '0750'
+
+- name: Write Patroni configuration
+  ansible.builtin.template:
+    src: patroni.yml.j2
+    dest: /etc/patroni/patroni.yml
+    owner: postgres
+    group: postgres
+    mode: '0600'
+  register: patroni_config
+  no_log: true
+
+- name: Install Patroni systemd service
+  ansible.builtin.template:
+    src: patroni.service.j2
+    dest: /etc/systemd/system/patroni.service
+    owner: root
+    group: root
+    mode: '0644'
+  register: patroni_unit
+
+- name: Reload systemd when unit changes
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: patroni_unit.changed
+
+- name: Check whether Patroni is already running
+  ansible.builtin.command: systemctl is-active patroni
+  register: patroni_active
+  changed_when: false
+  failed_when: false
+
+- name: Prevent implicit restart of existing Patroni cluster
+  ansible.builtin.assert:
+    that:
+      - not (patroni_active.rc == 0 and (patroni_config.changed or patroni_unit.changed))
+    fail_msg: 'Config/unit changed on a running Patroni node. Review changes and perform a controlled rolling restart manually; no automatic restart was attempted.'
+
+- name: Enable and start Patroni
+  ansible.builtin.systemd_service:
+    name: patroni
+    enabled: true
+    state: started
+
+- name: Wait for Patroni REST API
+  ansible.builtin.uri:
+    url: "http://{{ ansible_host }}:{{ patroni_rest_port | default(8008) }}/health"
+    status_code: 200
+  register: patroni_health
+  retries: 30
+  delay: 5
+  until: patroni_health.status | default(0) == 200
+  changed_when: false

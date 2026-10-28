@@ -107,7 +107,7 @@ key=pathlib.Path(pubkey).read_text().strip()
 user_data = '#cloud-config\n' + '\n'.join([
     'hostname: '+name,
     'fqdn: '+fqdn,
-    'manage_etc_hosts: true',
+    'manage_etc_hosts: false',
     'users:',
     '  - default',
     '  - name: almalinux',

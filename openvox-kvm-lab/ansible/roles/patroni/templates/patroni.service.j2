@@ -1,0 +1,19 @@
+[Unit]
+Description=Patroni PostgreSQL HA
+Wants=network-online.target
+After=network-online.target etcd.service
+Requires=etcd.service
+
+[Service]
+Type=simple
+User=postgres
+Group=postgres
+ExecStart=/opt/patroni/bin/patroni /etc/patroni/patroni.yml
+KillMode=process
+TimeoutSec=30
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

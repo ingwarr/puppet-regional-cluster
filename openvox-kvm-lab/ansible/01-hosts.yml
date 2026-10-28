@@ -1,0 +1,29 @@
+---
+- name: Configure static hostname resolution for OpenVox lab
+  hosts: all
+  become: true
+
+  tasks:
+    - name: Disable cloud-init hosts management
+      ansible.builtin.copy:
+        dest: /etc/cloud/cloud.cfg.d/99-openvox-hosts.cfg
+        content: |
+          manage_etc_hosts: false
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Install lab hosts file
+      ansible.builtin.copy:
+        dest: /etc/hosts
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # Managed by Ansible - OpenVox KVM lab
+          127.0.0.1 localhost localhost.localdomain
+          ::1 localhost localhost.localdomain
+
+          {% for host in groups['all'] %}
+          {{ hostvars[host].ansible_host }} {{ host }}.lab.example {{ host }}
+          {% endfor %}

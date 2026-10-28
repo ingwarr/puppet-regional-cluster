@@ -1,0 +1,7 @@
+---
+- name: Install PostgreSQL 16 prerequisites for Patroni
+  hosts: postgresql
+  become: true
+  gather_facts: true
+  roles:
+    - postgresql

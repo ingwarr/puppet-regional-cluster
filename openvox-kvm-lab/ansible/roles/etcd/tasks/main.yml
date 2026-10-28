@@ -1,0 +1,149 @@
+---
+- name: Validate etcd node count
+  ansible.builtin.assert:
+    that:
+      - groups['postgresql'] | length == 3
+      - inventory_hostname in groups['postgresql']
+      - ansible_host is defined
+
+- name: Map machine architecture to release architecture
+  ansible.builtin.set_fact:
+    etcd_release_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_architecture] | default('unsupported') }}"
+
+- name: Reject unsupported architecture
+  ansible.builtin.assert:
+    that: etcd_release_arch != 'unsupported'
+
+- name: Install dependencies
+  ansible.builtin.dnf:
+    name:
+      - curl
+      - tar
+      - firewalld
+    state: present
+
+- name: Enable firewalld
+  ansible.builtin.systemd_service:
+    name: firewalld
+    state: started
+    enabled: true
+
+- name: Open etcd client and peer ports
+  ansible.posix.firewalld:
+    port: "{{ item }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop:
+    - "{{ etcd_client_port }}"
+    - "{{ etcd_peer_port }}"
+
+- name: Create etcd service account
+  ansible.builtin.user:
+    name: etcd
+    system: true
+    home: "{{ etcd_data_dir }}"
+    shell: /sbin/nologin
+    create_home: false
+
+- name: Create etcd directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ etcd_data_dir }}", owner: etcd, group: etcd, mode: '0700'}
+    - {path: "{{ etcd_config_dir }}", owner: root, group: root, mode: '0755'}
+    - {path: /opt/etcd-releases, owner: root, group: root, mode: '0755'}
+
+- name: Check installed etcd version
+  ansible.builtin.command: /usr/local/bin/etcd --version
+  register: etcd_current_version
+  failed_when: false
+  changed_when: false
+
+- name: Determine whether binaries need installation
+  ansible.builtin.set_fact:
+    etcd_install_needed: "{{ etcd_current_version.rc != 0 or ('etcd Version: ' ~ (etcd_version | regex_replace('^v', ''))) not in etcd_current_version.stdout }}"
+
+- name: Download etcd release archive
+  ansible.builtin.get_url:
+    url: "https://github.com/etcd-io/etcd/releases/download/{{ etcd_version }}/etcd-{{ etcd_version }}-linux-{{ etcd_release_arch }}.tar.gz"
+    dest: "/opt/etcd-releases/etcd-{{ etcd_version }}-linux-{{ etcd_release_arch }}.tar.gz"
+    mode: '0644'
+  when: etcd_install_needed
+
+- name: Extract etcd release
+  ansible.builtin.unarchive:
+    src: "/opt/etcd-releases/etcd-{{ etcd_version }}-linux-{{ etcd_release_arch }}.tar.gz"
+    dest: /opt/etcd-releases
+    remote_src: true
+    creates: "/opt/etcd-releases/etcd-{{ etcd_version }}-linux-{{ etcd_release_arch }}/etcd"
+  when: etcd_install_needed
+
+- name: Install etcd and etcdctl
+  ansible.builtin.copy:
+    src: "/opt/etcd-releases/etcd-{{ etcd_version }}-linux-{{ etcd_release_arch }}/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0755'
+  loop: [etcd, etcdctl]
+  when: etcd_install_needed
+  notify: Restart etcd
+
+- name: Check existing etcd member state
+  ansible.builtin.stat:
+    path: "{{ etcd_data_dir }}/member"
+  register: etcd_existing_member
+
+- name: Warn about preserved member state
+  ansible.builtin.debug:
+    msg: "Existing etcd member state found; it will NOT be deleted or reinitialized."
+  when: etcd_existing_member.stat.exists
+
+- name: Write etcd configuration
+  ansible.builtin.template:
+    src: etcd.conf.j2
+    dest: "{{ etcd_config_dir }}/etcd.conf"
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart etcd
+
+- name: Install etcd systemd unit
+  ansible.builtin.template:
+    src: etcd.service.j2
+    dest: /etc/systemd/system/etcd.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart etcd
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+# Async is essential for first bootstrap: the first member waits for quorum.
+- name: Enable and start etcd on all three nodes concurrently
+  ansible.builtin.systemd_service:
+    name: etcd
+    enabled: true
+    state: started
+  async: 180
+  poll: 0
+  register: etcd_start_jobs
+
+- name: Wait for each service start to finish
+  ansible.builtin.async_status:
+    jid: "{{ etcd_start_jobs.ansible_job_id }}"
+  register: etcd_start_result
+  until: etcd_start_result.finished
+  retries: 45
+  delay: 4
+
+- name: Apply pending configuration changes
+  ansible.builtin.meta: flush_handlers

@@ -1,0 +1,60 @@
+---
+- name: Configure Patroni on PostgreSQL nodes
+  hosts: postgresql
+  become: true
+  gather_facts: true
+  serial: 1
+  roles:
+    - patroni
+
+- name: Validate Patroni cluster
+  hosts: postgresql
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read cluster state
+      ansible.builtin.command:
+        argv:
+          - /opt/patroni/bin/patronictl
+          - -c
+          - /etc/patroni/patroni.yml
+          - list
+          - --format
+          - json
+      register: patroni_cluster
+      changed_when: false
+      run_once: true
+
+    - name: Check three healthy members and exactly one leader
+      ansible.builtin.assert:
+        that:
+          - (patroni_cluster.stdout | from_json | length) == 3
+
+          - >-
+            ((patroni_cluster.stdout | from_json)
+            | selectattr('Role', 'equalto', 'Leader')
+            | list | length) == 1
+
+          - >-
+            ((patroni_cluster.stdout | from_json)
+            | selectattr('Role', 'equalto', 'Replica')
+            | list | length) == 2
+
+          - >-
+            ((patroni_cluster.stdout | from_json)
+            | selectattr('State', 'in', ['running', 'streaming'])
+            | list | length) == 3
+
+          - >-
+            ((patroni_cluster.stdout | from_json)
+            | map(attribute='Member') | list | sort)
+            == (groups['postgresql'] | sort)
+
+        fail_msg: "Patroni cluster is not healthy: {{ patroni_cluster.stdout }}"
+        success_msg: "Patroni cluster has one Leader and two healthy Replicas"
+      run_once: true
+
+    - name: Show cluster
+      ansible.builtin.debug:
+        var: patroni_cluster.stdout
+      run_once: true

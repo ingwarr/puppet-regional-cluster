@@ -1,0 +1,9 @@
+---
+# Preserve settings from inventory/lab01.env.
+etcd_version: v3.7.0
+etcd_client_port: 2379
+etcd_peer_port: 2380
+etcd_data_dir: /var/lib/etcd
+etcd_config_dir: /etc/etcd
+etcd_cluster_token: lab01-etcd
+# Lab-only plaintext HTTP transport, not suitable for production.

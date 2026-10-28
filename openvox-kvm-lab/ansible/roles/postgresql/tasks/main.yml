@@ -1,0 +1,68 @@
+---
+- name: Require AlmaLinux or RHEL-compatible version 9
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] == 'RedHat'
+      - ansible_facts['distribution_major_version'] == '9'
+    fail_msg: 'This role targets EL9 only.'
+
+- name: Install PGDG repository RPM
+  ansible.builtin.dnf:
+    name: "https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-{{ ansible_facts['architecture'] }}/pgdg-redhat-repo-latest.noarch.rpm"
+    state: present
+    disable_gpg_check: true
+
+- name: Disable distribution PostgreSQL module
+  ansible.builtin.command: dnf -qy module disable postgresql
+  register: postgresql_module_disable
+  changed_when: "'Disabling modules:' in postgresql_module_disable.stdout"
+
+- name: Install PostgreSQL 16 packages
+  ansible.builtin.dnf:
+    name:
+      - postgresql16
+      - postgresql16-server
+      - postgresql16-contrib
+    state: present
+
+- name: Stop and disable standalone PostgreSQL service
+  ansible.builtin.systemd_service:
+    name: postgresql-16.service
+    state: stopped
+    enabled: false
+
+- name: Ensure PostgreSQL data directory exists without initializing it
+  ansible.builtin.file:
+    path: /var/lib/pgsql/16/data
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: '0700'
+
+- name: Check for an existing database cluster
+  ansible.builtin.stat:
+    path: /var/lib/pgsql/16/data/PG_VERSION
+  register: postgresql_pg_version
+
+- name: Report PGDATA initialization state
+  ansible.builtin.debug:
+    msg: "{{ 'Existing PGDATA detected; not modifying it.' if postgresql_pg_version.stat.exists else 'PGDATA is uninitialized; Patroni will initialize it later.' }}"
+
+- name: Open PostgreSQL and Patroni ports in firewalld
+  ansible.posix.firewalld:
+    port: "{{ item }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop:
+    - '5432'
+    - '8008'
+
+- name: Read installed PostgreSQL version
+  ansible.builtin.command: /usr/pgsql-16/bin/postgres --version
+  register: postgresql_version
+  changed_when: false
+
+- name: Show installed PostgreSQL version
+  ansible.builtin.debug:
+    var: postgresql_version.stdout

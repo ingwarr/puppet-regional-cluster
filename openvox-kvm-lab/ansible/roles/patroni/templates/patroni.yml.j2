@@ -1,0 +1,72 @@
+scope: {{ patroni_scope | default('lab01-postgresql') | to_json }}
+namespace: /service/
+name: {{ inventory_hostname | to_json }}
+
+restapi:
+  listen: {{ (ansible_host ~ ':' ~ (patroni_rest_port | default(8008))) | to_json }}
+  connect_address: {{ (ansible_host ~ ':' ~ (patroni_rest_port | default(8008))) | to_json }}
+
+etcd3:
+  hosts:
+{% for host in groups['postgresql'] %}
+    - {{ (hostvars[host].ansible_host ~ ':' ~ (etcd_client_port | default(2379))) | to_json }}
+{% endfor %}
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+        wal_level: replica
+        hot_standby: 'on'
+        max_connections: 200
+        max_wal_senders: 10
+        max_replication_slots: 10
+        wal_keep_size: 512MB
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+  pg_hba:
+    - local all postgres peer
+    - local all all peer
+    - host all all 127.0.0.1/32 scram-sha-256
+{% for host in groups['postgresql'] %}
+    - host all all {{ hostvars[host].ansible_host }}/32 scram-sha-256
+{% endfor %}
+    - host all all {{ patroni_haproxy_ip | default('192.168.122.146') }}/32 scram-sha-256
+{% for host in groups['postgresql'] %}
+    - host replication {{ patroni_replication_user | default('replicator') }} {{ hostvars[host].ansible_host }}/32 scram-sha-256
+{% endfor %}
+
+postgresql:
+  listen: {{ (ansible_host ~ ':' ~ (postgresql_port | default(5432))) | to_json }}
+  connect_address: {{ (ansible_host ~ ':' ~ (postgresql_port | default(5432))) | to_json }}
+  data_dir: /var/lib/pgsql/16/data
+  bin_dir: /usr/pgsql-16/bin
+  authentication:
+    superuser:
+      username: postgres
+      password: {{ patroni_superuser_password | to_json }}
+    replication:
+      username: {{ patroni_replication_user | default('replicator') | to_json }}
+      password: {{ patroni_replication_password | to_json }}
+  parameters:
+    unix_socket_directories: /var/run/postgresql
+    password_encryption: scram-sha-256
+  create_replica_methods:
+    - basebackup
+  basebackup:
+    checkpoint: fast
+
+watchdog:
+  mode: 'off'
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+  nosync: false
