@@ -1,0 +1,47 @@
+---
+- name: Configure explicit OpenVox CA paths
+  hosts: ca
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Set CA directory explicitly
+      ansible.builtin.lineinfile:
+        path: /etc/puppetlabs/puppet/puppet.conf
+        insertafter: '^\[server\]$'
+        regexp: '^[[:space:]]*cadir[[:space:]]*='
+        line: 'cadir = /etc/puppetlabs/puppetserver/ca'
+        backup: true
+
+    - name: Set SSL directory explicitly
+      ansible.builtin.lineinfile:
+        path: /etc/puppetlabs/puppet/puppet.conf
+        insertafter: '^\[server\]$'
+        regexp: '^[[:space:]]*ssldir[[:space:]]*='
+        line: 'ssldir = /etc/puppetlabs/puppet/ssl'
+        backup: true
+
+    - name: Verify effective Puppet paths
+      ansible.builtin.command:
+        argv:
+          - /opt/puppetlabs/bin/puppet
+          - config
+          - print
+          - cadir
+          - ssldir
+          - --section
+          - server
+          - --config
+          - /etc/puppetlabs/puppet/puppet.conf
+      become_user: puppet
+      args:
+        chdir: /tmp
+      register: effective_paths
+      changed_when: false
+      check_mode: false
+
+    - name: Assert expected paths
+      ansible.builtin.assert:
+        that:
+          - "'cadir = /etc/puppetlabs/puppetserver/ca' in effective_paths.stdout_lines"
+          - "'ssldir = /etc/puppetlabs/puppet/ssl' in effective_paths.stdout_lines"

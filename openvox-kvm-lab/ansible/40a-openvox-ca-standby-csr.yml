@@ -1,0 +1,193 @@
+---
+# Stage 40a: create standby private key and CSR locally; do not sign/start service.
+- name: Prepare standby CA server CSR without starting Puppet Server
+  hosts: ca02
+  become: true
+  gather_facts: false
+  vars:
+    standby_certname: ca02.lab.example
+    standby_ssl_dir: /etc/puppetlabs/puppet/ssl
+    standby_cadir: /etc/puppetlabs/puppetserver/ca
+    standby_csr_dir: /var/lib/openvox-ca-standby
+    standby_key: "{{ standby_ssl_dir }}/private_keys/{{ standby_certname }}.pem"
+    standby_csr: "{{ standby_csr_dir }}/{{ standby_certname }}.csr"
+    standby_cert: "{{ standby_ssl_dir }}/certs/{{ standby_certname }}.pem"
+    standby_confirm: false
+  tasks:
+    - name: Verify standby service is masked and inactive
+      ansible.builtin.shell: |
+        set -euo pipefail
+        test "$(systemctl is-enabled puppetserver 2>/dev/null || true)" = masked
+        test "$(systemctl is-active puppetserver 2>/dev/null || true)" != active
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+
+    - name: Verify shared CA mount and link
+      ansible.builtin.shell: |
+        set -euo pipefail
+        test "$(readlink -f /etc/puppetlabs/puppetserver/ca)" = /srv/openvox-ca
+        test "$(findmnt -n -o SOURCE --mountpoint /srv/openvox-ca)" = '192.168.122.163:/srv/nfs/openvox-ca'
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+
+    - name: Verify shared CA certificate is readable by puppet
+      ansible.builtin.command:
+        argv: [/usr/bin/test, -r, "{{ standby_cadir }}/ca_crt.pem"]
+      become_user: puppet
+      changed_when: false
+      check_mode: false
+
+    - name: Verify effective Puppet settings for standby
+      ansible.builtin.command:
+        argv:
+          - /opt/puppetlabs/bin/puppet
+          - config
+          - print
+          - cadir
+          - ssldir
+          - certname
+          - --section
+          - server
+          - --config
+          - /etc/puppetlabs/puppet/puppet.conf
+      become_user: puppet
+      register: standby_settings
+      changed_when: false
+      check_mode: false
+
+    - name: Assert standby configuration matches expected identity and paths
+      ansible.builtin.assert:
+        that:
+          - "'cadir = ' ~ standby_cadir in standby_settings.stdout_lines"
+          - "'ssldir = ' ~ standby_ssl_dir in standby_settings.stdout_lines"
+          - "'certname = ' ~ standby_certname in standby_settings.stdout_lines"
+        fail_msg: Set explicit certname in ca02 puppet.conf [server] before creating a key.
+
+    - name: Inspect existing private key
+      ansible.builtin.stat:
+        path: "{{ standby_key }}"
+      register: key_stat
+      changed_when: false
+
+    - name: Inspect existing CSR
+      ansible.builtin.stat:
+        path: "{{ standby_csr }}"
+      register: csr_stat
+      changed_when: false
+
+    - name: Inspect existing signed server certificate
+      ansible.builtin.stat:
+        path: "{{ standby_cert }}"
+      register: cert_stat
+      changed_when: false
+
+    - name: Refuse ambiguous partial or already signed state
+      ansible.builtin.assert:
+        that:
+          - not cert_stat.stat.exists
+          - (not csr_stat.stat.exists) or key_stat.stat.exists
+          - (not key_stat.stat.exists) or (key_stat.stat.isreg | default(false))
+          - (not csr_stat.stat.exists) or (csr_stat.stat.isreg | default(false))
+        fail_msg: Existing server certificate or inconsistent CSR/key state; inspect manually.
+
+    - name: Verify existing private key is valid when present
+      ansible.builtin.command:
+        argv: [openssl, pkey, -in, "{{ standby_key }}", -noout]
+      become_user: puppet
+      when: key_stat.stat.exists
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Verify existing CSR identity and key match when present
+      ansible.builtin.shell: |
+        set -euo pipefail
+        test "$(openssl req -in '{{ standby_csr }}' -noout -subject -nameopt RFC2253)" = 'subject=CN={{ standby_certname }}'
+        a="$(openssl req -in '{{ standby_csr }}' -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum | cut -d' ' -f1)"
+        b="$(openssl pkey -in '{{ standby_key }}' -pubout -outform DER | sha256sum | cut -d' ' -f1)"
+        test "$a" = "$b"
+        openssl req -in '{{ standby_csr }}' -verify -noout >/dev/null
+      args:
+        executable: /bin/bash
+      become_user: puppet
+      when: csr_stat.stat.exists
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Confirm generation is explicitly authorized
+      ansible.builtin.assert:
+        that: standby_confirm | bool
+        fail_msg: Preflight passed; supply -e standby_confirm=true to create a missing key and CSR.
+      when:
+        - not ansible_check_mode
+        - not csr_stat.stat.exists
+
+    - name: Ensure CSR staging directory exists
+      ansible.builtin.file:
+        path: "{{ standby_csr_dir }}"
+        state: directory
+        owner: puppet
+        group: puppet
+        mode: '0700'
+      when: standby_confirm | bool and not ansible_check_mode
+
+    - name: Ensure local private key directory exists
+      ansible.builtin.file:
+        path: "{{ standby_ssl_dir }}/private_keys"
+        state: directory
+        owner: puppet
+        group: puppet
+        mode: '0750'
+      when: standby_confirm | bool and not ansible_check_mode
+
+    - name: Generate private key only if absent
+      ansible.builtin.command:
+        argv: [openssl, genpkey, -algorithm, RSA, -pkeyopt, rsa_keygen_bits:3072, -out, "{{ standby_key }}"]
+        creates: "{{ standby_key }}"
+      become_user: puppet
+      no_log: true
+      when: standby_confirm | bool and not ansible_check_mode
+
+    - name: Restrict private key permissions
+      ansible.builtin.file:
+        path: "{{ standby_key }}"
+        owner: puppet
+        group: puppet
+        mode: '0600'
+      when: standby_confirm | bool and not ansible_check_mode
+
+    - name: Generate CSR from existing key only if absent
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -new
+          - -sha256
+          - -key
+          - "{{ standby_key }}"
+          - -subj
+          - "/CN={{ standby_certname }}"
+          - -out
+          - "{{ standby_csr }}"
+        creates: "{{ standby_csr }}"
+      become_user: puppet
+      when: standby_confirm | bool and not ansible_check_mode
+
+    - name: Verify resulting CSR and key match
+      ansible.builtin.shell: |
+        set -euo pipefail
+        openssl req -in '{{ standby_csr }}' -verify -noout >/dev/null
+        a="$(openssl req -in '{{ standby_csr }}' -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum | cut -d' ' -f1)"
+        b="$(openssl pkey -in '{{ standby_key }}' -pubout -outform DER | sha256sum | cut -d' ' -f1)"
+        test "$a" = "$b"
+      args:
+        executable: /bin/bash
+      become_user: puppet
+      changed_when: false
+      when: standby_confirm | bool and not ansible_check_mode
+      no_log: true

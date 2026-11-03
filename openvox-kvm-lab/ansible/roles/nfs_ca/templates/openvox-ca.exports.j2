@@ -1,0 +1,3 @@
+{% for client in nfs_ca_clients %}
+{{ nfs_ca_export }} {{ client }}(rw,sync,no_subtree_check,root_squash)
+{% endfor %}

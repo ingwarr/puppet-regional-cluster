@@ -1,0 +1,6 @@
+---
+openvox_ca_storage_path: /srv/openvox-ca
+openvox_ca_storage_source: 192.168.122.163:/srv/nfs/openvox-ca
+openvox_ca_storage_user: puppet
+openvox_ca_storage_uid: 2500
+openvox_ca_storage_gid: 2500

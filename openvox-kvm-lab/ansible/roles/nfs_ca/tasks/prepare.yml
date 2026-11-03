@@ -1,0 +1,115 @@
+---
+- name: Validate NFS lab configuration
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.os_family == 'RedHat'
+      - ansible_facts.distribution_major_version == '9'
+      - nfs_ca_clients | length == 2
+      - nfs_ca_device == '/dev/vdb'
+      - nfs_ca_export.startswith(nfs_ca_mount ~ '/')
+
+- name: Install NFS and filesystem utilities
+  ansible.builtin.dnf:
+    name: [nfs-utils, xfsprogs, util-linux]
+    state: present
+
+- name: Inspect filesystem on backing device
+  ansible.builtin.command:
+    argv: [lsblk, -n, -o, FSTYPE, '{{ nfs_ca_device }}']
+  register: nfs_device_fs
+  changed_when: false
+  check_mode: false
+
+- name: Check whether backing device has child partitions
+  ansible.builtin.command:
+    argv: [lsblk, -n, -o, NAME, '{{ nfs_ca_device }}']
+  register: nfs_device_tree
+  changed_when: false
+
+- name: Inspect exact mountpoint
+  ansible.builtin.command:
+    argv: [findmnt, -n, -o, SOURCE, --mountpoint, '{{ nfs_ca_mount }}']
+  register: nfs_existing_mount
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Debug NFS device detection
+  ansible.builtin.debug:
+    msg:
+      - "device={{ nfs_ca_device }}"
+      - "stdout={{ nfs_device_fs.stdout | to_json }}"
+      - "rc={{ nfs_device_fs.rc }}"
+      - "allow_format={{ nfs_ca_allow_format }}"
+
+- name: Require XFS or explicit permission to initialize an unused blank lab disk
+  ansible.builtin.assert:
+    that:
+      - (nfs_device_fs.stdout | trim) == 'xfs' or ((nfs_device_fs.stdout | trim) == '' and (nfs_ca_allow_format | bool))
+      - (nfs_device_fs.stdout | trim) != '' or (nfs_device_tree.stdout_lines | length == 1)
+      - (nfs_device_fs.stdout | trim) != '' or (nfs_existing_mount.rc != 0)
+    fail_msg: 'Unsafe device state. Inspect lsblk -f and findmnt; formatting requires explicit approval and an unused blank disk.'
+
+- name: Create XFS only on explicitly approved blank lab disk
+  ansible.builtin.command:
+    argv: [mkfs.xfs, '{{ nfs_ca_device }}']
+  when:
+    - (nfs_device_fs.stdout | trim) == ''
+    - nfs_ca_allow_format | bool
+
+- name: Create mount directory
+  ansible.builtin.file:
+    path: '{{ nfs_ca_mount }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Mount backing XFS filesystem persistently
+  ansible.posix.mount:
+    path: '{{ nfs_ca_mount }}'
+    src: '{{ nfs_ca_device }}'
+    fstype: xfs
+    opts: defaults
+    state: mounted
+
+- name: Create CA export directory without depending on OpenVox account
+  ansible.builtin.file:
+    path: '{{ nfs_ca_export }}'
+    state: directory
+    mode: '0700'
+  # Deliberately do not modify ownership of existing CA data.
+
+- name: Configure CA export
+  ansible.builtin.template:
+    src: openvox-ca.exports.j2
+    dest: /etc/exports.d/openvox-ca.exports
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload NFS exports
+
+- name: Enable NFS server
+  ansible.builtin.systemd_service:
+    name: nfs-server
+    enabled: true
+    state: started
+
+- name: Allow NFS through firewalld
+  ansible.posix.firewalld:
+    service: nfs
+    permanent: true
+    immediate: true
+    state: enabled
+
+- name: Apply exports before validation
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify exported paths
+  ansible.builtin.command: exportfs -v
+  register: nfs_exports
+  changed_when: false
+
+- name: Print exports
+  ansible.builtin.debug:
+    var: nfs_exports.stdout_lines

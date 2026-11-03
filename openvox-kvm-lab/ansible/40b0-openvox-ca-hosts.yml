@@ -1,0 +1,65 @@
+---
+# Temporary cluster-local resolution for the active CA during stage 40.
+# IP addresses are read exclusively from inventory (ansible_host).
+- name: Configure inventory-driven CA host resolution
+  hosts: ca
+  become: true
+  gather_facts: false
+  vars:
+    openvox_ca_active_host: ca01
+    openvox_ca_domain: lab.example
+    openvox_ca_service_alias: puppet
+    openvox_ca_nodes: "{{ groups['ca'] }}"
+  pre_tasks:
+    - name: Validate active host and inventory addresses
+      ansible.builtin.assert:
+        that:
+          - openvox_ca_active_host in openvox_ca_nodes
+          - openvox_ca_service_alias | length > 0
+          - openvox_ca_nodes | length >= 2
+          - hostvars[item].ansible_host is defined
+          - hostvars[item].ansible_host is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
+        fail_msg: "CA inventory must supply IPv4 addresses in ansible_host; no DNS name or implicit IP lookup is permitted."
+      loop: "{{ openvox_ca_nodes }}"
+
+    - name: Ensure service alias is not already defined outside managed block
+      ansible.builtin.shell: |
+        python3 - <<'PY'
+        from pathlib import Path
+        import sys
+        data = Path('/etc/hosts').read_text().splitlines()
+        inside = False
+        for line in data:
+            if line.strip() == '# BEGIN ANSIBLE MANAGED OPENVOX CA HOSTS':
+                inside = True
+                continue
+            if line.strip() == '# END ANSIBLE MANAGED OPENVOX CA HOSTS':
+                inside = False
+                continue
+            if not inside and line.split('#', 1)[0].split()[1:].count('{{ openvox_ca_service_alias }}'):
+                sys.exit('Service alias already exists outside managed block; resolve manually')
+        PY
+      changed_when: false
+      check_mode: false
+
+  tasks:
+    - name: Configure active CA service alias
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED OPENVOX CA HOSTS"
+        block: |
+          {{ hostvars[openvox_ca_active_host].ansible_host }} {{ openvox_ca_service_alias }}
+        backup: true
+
+    - name: Verify active CA alias resolves to inventory address
+      ansible.builtin.command:
+        argv: [getent, ahostsv4, "{{ openvox_ca_service_alias }}"]
+      register: ca_alias_lookup
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Assert alias points to current active CA
+      ansible.builtin.assert:
+        that:
+          - ca_alias_lookup.stdout_lines[0].split()[0] == hostvars[openvox_ca_active_host].ansible_host
+      when: not ansible_check_mode

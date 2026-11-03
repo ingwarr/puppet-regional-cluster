@@ -1,0 +1,32 @@
+---
+- name: Collect OpenVox service account IDs on CA nodes
+  hosts: ca
+  become: true
+  tasks:
+    - name: Read puppet UID
+      ansible.builtin.command: id -u puppet
+      register: puppet_uid
+      changed_when: false
+    - name: Read puppet GID
+      ansible.builtin.command: id -g puppet
+      register: puppet_gid
+      changed_when: false
+
+- name: Validate matching CA IDs and finalize NFS ownership
+  hosts: nfs
+  become: true
+  tasks:
+    - name: Validate both CA nodes and matching service account IDs
+      ansible.builtin.assert:
+        that:
+          - groups['ca'] | length == 2
+          - hostvars[groups['ca'][0]].puppet_uid.stdout == hostvars[groups['ca'][1]].puppet_uid.stdout
+          - hostvars[groups['ca'][0]].puppet_gid.stdout == hostvars[groups['ca'][1]].puppet_gid.stdout
+        fail_msg: 'CA nodes must have identical puppet UID/GID.'
+    - name: Finalize export ownership
+      ansible.builtin.include_role:
+        name: nfs_ca
+        tasks_from: finalize
+      vars:
+        nfs_ca_owner_uid: "{{ hostvars[groups['ca'][0]].puppet_uid.stdout }}"
+        nfs_ca_owner_gid: "{{ hostvars[groups['ca'][0]].puppet_gid.stdout }}"

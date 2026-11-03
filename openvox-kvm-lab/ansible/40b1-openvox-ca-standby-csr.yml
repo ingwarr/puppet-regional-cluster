@@ -1,0 +1,106 @@
+---
+# Stage 40b1: prepare a standby CSR, reusing the existing local private key.
+# Does not contact the active CA, sign anything, or start puppetserver.
+- name: Prepare privileged OpenVox standby CA CSR
+  hosts: "{{ openvox_ca_standby_targets | default('ca02') }}"
+  become: true
+  gather_facts: false
+  vars:
+    openvox_ca_domain: lab.example
+    openvox_ca_service_alias: puppet
+    openvox_ca_certname: "{{ inventory_hostname }}.{{ openvox_ca_domain }}"
+    openvox_ca_key_path: "/etc/puppetlabs/puppet/ssl/private_keys/{{ openvox_ca_certname }}.pem"
+    openvox_ca_csr_path: "/var/lib/openvox-ca-standby/{{ openvox_ca_certname }}.csr"
+    openvox_ca_cli_auth_oid: '1.3.6.1.4.1.34380.1.3.39'
+  tasks:
+    - name: Check local standby private key exists
+      ansible.builtin.stat:
+        path: "{{ openvox_ca_key_path }}"
+      register: standby_key
+
+    - name: Refuse to create or replace a private key
+      ansible.builtin.assert:
+        that:
+          - standby_key.stat.exists
+          - standby_key.stat.isreg
+        fail_msg: "Existing standby key is missing: {{ openvox_ca_key_path }}; run stage 40a first."
+
+    - name: Ensure CSR directory exists
+      ansible.builtin.file:
+        path: "{{ openvox_ca_csr_path | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Build or validate standby CSR with SAN and Puppet CA CLI authorization
+      ansible.builtin.shell: |
+        set -euo pipefail
+        key="$CA_KEY"
+        csr="$CA_CSR"
+        certname="$CA_CERTNAME"
+        alias="$CA_ALIAS"
+        oid="$CA_AUTH_OID"
+        expected="DNS:${alias}, DNS:${certname}"
+
+        # Confirm the private key is parseable without displaying its contents.
+        openssl pkey -in "$key" -noout >/dev/null
+
+        valid=0
+        if [ -s "$csr" ] && openssl req -in "$csr" -noout -verify >/dev/null 2>&1; then
+          subject="$(openssl req -in "$csr" -noout -subject -nameopt RFC2253)"
+          details="$(openssl req -in "$csr" -noout -text)"
+          key_hash="$(openssl pkey -in "$key" -pubout -outform DER | openssl dgst -sha256)"
+          csr_hash="$(openssl req -in "$csr" -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256)"
+          if [ "$subject" = "subject=CN=${certname}" ] \
+             && [ "$key_hash" = "$csr_hash" ] \
+             && grep -Fq "$expected" <<< "$details" \
+             && grep -Fq "$oid" <<< "$details" \
+             && grep -Fq 'true' <<< "$(grep -A 2 -F "$oid" <<< "$details")"; then
+            valid=1
+          fi
+        fi
+        if [ "$valid" -eq 1 ]; then
+          echo 'CSR_ALREADY_VALID'
+          exit 0
+        fi
+        if [ "$CA_CHECK_MODE" = 'true' ]; then
+          echo 'CSR_NEEDS_REGENERATION'
+          exit 0
+        fi
+        umask 077
+        tmp="$(mktemp "${csr}.tmp.XXXXXXXX")"
+        trap 'rm -f "$tmp"' EXIT
+        openssl req -new -sha256 -key "$key" \
+          -subj "/CN=${certname}" \
+          -addext "subjectAltName=DNS:${alias},DNS:${certname}" \
+          -addext "${oid}=ASN1:UTF8String:true" \
+          -out "$tmp"
+        openssl req -in "$tmp" -noout -verify >/dev/null
+        details="$(openssl req -in "$tmp" -noout -text)"
+        grep -Fq "$expected" <<< "$details"
+        grep -Fq "$oid" <<< "$details"
+        grep -Fq 'true' <<< "$(grep -A 2 -F "$oid" <<< "$details")"
+        if [ -e "$csr" ]; then
+          cp -p -- "$csr" "${csr}.bak.$(date +%Y%m%d%H%M%S)"
+        fi
+        install -m 0600 -o root -g root "$tmp" "$csr"
+        echo 'CSR_REGENERATED'
+      args:
+        executable: /bin/bash
+      # Run the read-only validation even under --check. The script itself
+      # exits before creating/replacing the CSR when CA_CHECK_MODE=true.
+      check_mode: false
+      environment:
+        CA_KEY: "{{ openvox_ca_key_path }}"
+        CA_CSR: "{{ openvox_ca_csr_path }}"
+        CA_CERTNAME: "{{ openvox_ca_certname }}"
+        CA_ALIAS: "{{ openvox_ca_service_alias }}"
+        CA_AUTH_OID: "{{ openvox_ca_cli_auth_oid }}"
+        CA_CHECK_MODE: "{{ ansible_check_mode | ternary('true', 'false') }}"
+      register: csr_result
+      changed_when: "'CSR_REGENERATED' in csr_result.stdout or 'CSR_NEEDS_REGENERATION' in csr_result.stdout"
+
+    - name: Show CSR validation outcome
+      ansible.builtin.debug:
+        msg: "{{ (csr_result.stdout_lines | default([]) | last) if (csr_result.stdout_lines | default([]) | length > 0) else ('CSR task returned no output') }}"

@@ -1,0 +1,114 @@
+---
+- name: Validate OpenVox CA shared storage locally
+  hosts: ca
+  become: true
+  gather_facts: true
+  roles:
+    - openvox_ca_storage
+
+- name: Create a cross-node probe on ca01
+  hosts: ca01
+  become: true
+  gather_facts: false
+  vars:
+    ca_probe_dir: /srv/openvox-ca
+  tasks:
+    - name: Create unique probe file as puppet
+      ansible.builtin.command:
+        argv:
+          - runuser
+          - -u
+          - puppet
+          - --
+          - mktemp
+          - "{{ ca_probe_dir }}/.ansible-ca-cross-XXXXXXXX"
+      register: ca_probe_create
+      changed_when: true
+      when: not ansible_check_mode
+
+    - name: Validate probe path before writing
+      ansible.builtin.assert:
+        that:
+          - ca_probe_create.stdout is match('^' ~ (ca_probe_dir | regex_escape) ~ '/\.ansible-ca-cross-[A-Za-z0-9]{8}$')
+      when: not ansible_check_mode
+
+    - name: Write probe content as puppet
+      ansible.builtin.command:
+        argv:
+          - runuser
+          - -u
+          - puppet
+          - --
+          - sh
+          - -c
+          - 'printf "%s\n" "$2" > "$1"'
+          - ca-storage-probe
+          - "{{ ca_probe_create.stdout }}"
+          - OPENVOX_CA_STORAGE_PROBE_OK
+      changed_when: true
+      when: not ansible_check_mode
+
+- name: Verify ca01 probe is visible from ca02
+  hosts: ca02
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read shared probe as puppet on ca02
+      ansible.builtin.command:
+        argv:
+          - runuser
+          - -u
+          - puppet
+          - --
+          - cat
+          - "{{ hostvars['ca01'].ca_probe_create.stdout }}"
+      register: ca_probe_read
+      changed_when: false
+      failed_when: false
+      when:
+        - not ansible_check_mode
+        - hostvars['ca01'].ca_probe_create is defined
+        - hostvars['ca01'].ca_probe_create.stdout | default('') | length > 0
+
+- name: Remove probe from ca01 even if verification failed
+  hosts: ca01
+  become: true
+  gather_facts: false
+  vars:
+    ca_probe_dir: /srv/openvox-ca
+  tasks:
+    - name: Validate probe path before removal
+      ansible.builtin.assert:
+        that:
+          - ca_probe_create.stdout is match('^' ~ (ca_probe_dir | regex_escape) ~ '/\.ansible-ca-cross-[A-Za-z0-9]{8}$')
+      when:
+        - not ansible_check_mode
+        - ca_probe_create is defined
+        - ca_probe_create.stdout | default('') | length > 0
+
+    - name: Remove probe as puppet
+      ansible.builtin.command:
+        argv:
+          - runuser
+          - -u
+          - puppet
+          - --
+          - rm
+          - -f
+          - --
+          - "{{ ca_probe_create.stdout }}"
+      changed_when: true
+      when:
+        - not ansible_check_mode
+        - ca_probe_create is defined
+        - ca_probe_create.stdout | default('') | length > 0
+
+    - name: Confirm cross-node probe succeeded
+      ansible.builtin.assert:
+        that:
+          - hostvars['ca02'].ca_probe_read is defined
+          - hostvars['ca02'].ca_probe_read.rc | default(1) == 0
+          - hostvars['ca02'].ca_probe_read.stdout | default('') == 'OPENVOX_CA_STORAGE_PROBE_OK'
+        fail_msg: 'Cross-node read from ca02 failed; the probe was cleaned up on ca01.'
+        success_msg: 'CA shared storage cross-node read succeeded; probe removed.'
+      when: not ansible_check_mode

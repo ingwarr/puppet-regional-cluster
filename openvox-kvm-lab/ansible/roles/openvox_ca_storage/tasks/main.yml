@@ -1,0 +1,75 @@
+---
+- name: Read puppet account identity
+  ansible.builtin.command:
+    argv: [id, -u, "{{ openvox_ca_storage_user }}"]
+  register: ca_storage_uid
+  changed_when: false
+  check_mode: false
+
+- name: Read puppet primary group identity
+  ansible.builtin.command:
+    argv: [id, -g, "{{ openvox_ca_storage_user }}"]
+  register: ca_storage_gid
+  changed_when: false
+  check_mode: false
+
+- name: Check expected UID and GID
+  ansible.builtin.assert:
+    that:
+      - ca_storage_uid.stdout | int == openvox_ca_storage_uid | int
+      - ca_storage_gid.stdout | int == openvox_ca_storage_gid | int
+
+- name: Inspect exact mounted filesystem
+  ansible.builtin.command:
+    argv:
+      - findmnt
+      - --mountpoint
+      - "{{ openvox_ca_storage_path }}"
+      - --noheadings
+      - --output
+      - "SOURCE,FSTYPE"
+  register: openvox_ca_storage_mount
+  changed_when: false
+  check_mode: false
+
+- name: Validate shared mount source and type
+  ansible.builtin.assert:
+    that:
+      - openvox_ca_storage_mount.stdout.split() | length == 2
+      - openvox_ca_storage_mount.stdout.split()[0] == openvox_ca_storage_source
+      - openvox_ca_storage_mount.stdout.split()[1] in ['nfs', 'nfs4']
+    fail_msg: 'Unexpected CA shared mount: {{ openvox_ca_storage_mount.stdout }}'
+
+- name: Inspect shared directory without changing permissions
+  ansible.builtin.stat:
+    path: "{{ openvox_ca_storage_path }}"
+    follow: true
+  register: ca_storage_dir
+
+- name: Validate shared directory owner and permissions
+  ansible.builtin.assert:
+    that:
+      - ca_storage_dir.stat.isdir | default(false)
+      - ca_storage_dir.stat.uid | int == openvox_ca_storage_uid | int
+      - ca_storage_dir.stat.gid | int == openvox_ca_storage_gid | int
+      - ca_storage_dir.stat.mode == '0700'
+
+- name: Exercise local CA storage as puppet
+  when: not ansible_check_mode
+  block:
+    - name: Create unique local probe as puppet
+      ansible.builtin.command:
+        argv: [runuser, -u, "{{ openvox_ca_storage_user }}", --, mktemp, "{{ openvox_ca_storage_path }}/.ansible-ca-local-XXXXXXXX"]
+      register: ca_storage_local_probe
+      changed_when: true
+
+    - name: Inspect local probe as puppet
+      ansible.builtin.command:
+        argv: [runuser, -u, "{{ openvox_ca_storage_user }}", --, test, -r, "{{ ca_storage_local_probe.stdout }}"]
+      changed_when: false
+  always:
+    - name: Remove local probe as puppet
+      ansible.builtin.command:
+        argv: [runuser, -u, "{{ openvox_ca_storage_user }}", --, rm, -f, --, "{{ ca_storage_local_probe.stdout }}"]
+      changed_when: true
+      when: ca_storage_local_probe.stdout is defined and ca_storage_local_probe.stdout.startswith(openvox_ca_storage_path ~ '/.ansible-ca-local-')

@@ -1,0 +1,7 @@
+---
+openvox_major_version: 8
+openvox_service_user: puppet
+openvox_service_group: puppet
+openvox_service_uid: 2500
+openvox_service_gid: 2500
+openvox_release_rpm: https://yum.voxpupuli.org/openvox8-release-el-9.noarch.rpm

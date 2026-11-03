@@ -1,0 +1,7 @@
+---
+- name: Install OpenVox 8 packages on selected CA hosts
+  hosts: ca
+  become: true
+  gather_facts: true
+  roles:
+    - openvox_packages

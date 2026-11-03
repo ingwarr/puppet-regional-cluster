@@ -1,0 +1,101 @@
+---
+# Read-only discovery before CA bootstrap. Intentionally does not create CA keys.
+- name: CA bootstrap preflight (read only)
+  hosts: ca
+  become: true
+  gather_facts: false
+  vars:
+    ca_shared_path: /srv/openvox-ca
+    ca_expected_source: 192.168.122.163:/srv/nfs/openvox-ca
+  tasks:
+    - name: Verify expected mount
+      ansible.builtin.command:
+        argv: [findmnt, --mountpoint, '{{ ca_shared_path }}', --noheadings, --output, 'SOURCE,FSTYPE']
+      register: ca_mount_info
+      changed_when: false
+      check_mode: false
+
+    - name: Assert correct NFS source and type
+      ansible.builtin.assert:
+        that:
+          - ca_mount_info.stdout.split() | length == 2
+          - ca_mount_info.stdout.split()[0] == ca_expected_source
+          - ca_mount_info.stdout.split()[1] in ['nfs', 'nfs4']
+
+    - name: Inspect service state
+      ansible.builtin.command:
+        argv: [systemctl, is-active, puppetserver]
+      register: ca_active
+      failed_when: false
+      changed_when: false
+      check_mode: false
+
+    - name: Inspect service enablement
+      ansible.builtin.command:
+        argv: [systemctl, is-enabled, puppetserver]
+      register: ca_enabled
+      failed_when: false
+      changed_when: false
+      check_mode: false
+
+    - name: Inspect CA configuration paths without revealing private keys
+      ansible.builtin.command:
+        argv:
+          - /opt/puppetlabs/bin/puppet
+          - config
+          - print
+          - cadir
+          - cacert
+          - cakey
+          - capub
+          - hostcert
+          - hostprivkey
+          - ssldir
+          - --section
+          - server
+      register: ca_config_paths
+      changed_when: false
+      check_mode: false
+
+    - name: Inspect shared directory entries (names only)
+      ansible.builtin.command:
+        argv:
+          - /sbin/runuser
+          - -u
+          - puppet
+          - --
+          - find
+          - /srv/openvox-ca
+          - -maxdepth
+          - "2"
+          - -mindepth
+          - "1"
+          - -printf
+          - "%y %p\n"
+        chdir: /tmp
+      become: true
+      become_user: root
+      register: ca_shared_entries
+      changed_when: false
+      check_mode: false
+
+    - name: Report preflight
+      ansible.builtin.debug:
+        msg:
+          node: '{{ inventory_hostname }}'
+          service: '{{ ca_active.stdout }}'
+          enablement: '{{ ca_enabled.stdout }}'
+          mount: '{{ ca_mount_info.stdout }}'
+          puppet_paths: '{{ ca_config_paths.stdout_lines }}'
+          shared_entries: '{{ ca_shared_entries.stdout_lines }}'
+
+- name: Assert no CA service running during initial bootstrap planning
+  hosts: ca01
+  gather_facts: false
+  tasks:
+    - name: Require both nodes stopped before choosing bootstrap strategy
+      ansible.builtin.assert:
+        that:
+          - hostvars['ca01'].ca_active.stdout != 'active'
+          - hostvars['ca02'].ca_active.stdout != 'active'
+        fail_msg: 'CA already running; do not perform initial bootstrap. Inspect existing state.'

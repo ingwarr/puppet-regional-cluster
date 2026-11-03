@@ -1,0 +1,198 @@
+---
+# One-time bootstrap of OpenVox 8 CA on ca01.
+# Default: preflight only. Explicit -e openvox_ca_bootstrap_confirm=true required.
+- name: Inspect CA hosts before any bootstrap
+  hosts: ca
+  become: true
+  gather_facts: false
+  vars:
+    ca_mount: /srv/openvox-ca
+    ca_link: /etc/puppetlabs/puppetserver/ca
+    ca_nfs_source: 192.168.122.163:/srv/nfs/openvox-ca
+  tasks:
+    - name: Read service state (read-only)
+      ansible.builtin.command:
+        argv: [systemctl, is-active, puppetserver]
+      register: ca_service_state
+      changed_when: false
+      failed_when: ca_service_state.rc not in [0, 3]
+      check_mode: false
+
+    - name: Assert service is not running
+      ansible.builtin.assert:
+        that:
+          - ca_service_state.stdout | trim != 'active'
+        fail_msg: "puppetserver is active on {{ inventory_hostname }}"
+
+    - name: Read actual mount at shared CA path
+      ansible.builtin.command:
+        argv: [findmnt, -n, -M, "{{ ca_mount }}", -o, 'SOURCE,FSTYPE']
+      register: ca_mount_result
+      changed_when: false
+      check_mode: false
+
+    - name: Assert expected NFS mount
+      ansible.builtin.assert:
+        that:
+          - ca_mount_result.stdout.split() | length == 2
+          - ca_mount_result.stdout.split()[0] == ca_nfs_source
+          - ca_mount_result.stdout.split()[1] == 'nfs4'
+
+    - name: Inspect CA symlink without following it
+      ansible.builtin.stat:
+        path: "{{ ca_link }}"
+        follow: false
+      register: ca_link_stat
+
+    - name: Assert CA path is expected symlink
+      ansible.builtin.assert:
+        that:
+          - ca_link_stat.stat.islnk | default(false)
+          - ca_link_stat.stat.lnk_source | default('') == ca_mount
+
+    - name: Inspect shared CA directory as puppet (read-only)
+      ansible.builtin.command:
+        argv:
+          - /sbin/runuser
+          - -u
+          - puppet
+          - --
+          - find
+          - "{{ ca_mount }}"
+          - -mindepth
+          - '1'
+          - -maxdepth
+          - '1'
+          - -printf
+          - '%f\n'
+        chdir: /tmp
+      register: ca_entries
+      changed_when: false
+      check_mode: false
+
+    - name: Check puppet write access to CA mount
+      ansible.builtin.command:
+        argv: [/sbin/runuser, -u, puppet, --, test, -w, "{{ ca_mount }}"]
+        chdir: /tmp
+      changed_when: false
+      check_mode: false
+
+    - name: Inspect local SSL entries (names only)
+      ansible.builtin.command:
+        argv:
+          - /sbin/runuser
+          - -u
+          - puppet
+          - --
+          - find
+          - /etc/puppetlabs/puppet/ssl
+          - -mindepth
+          - '1'
+          - -maxdepth
+          - '1'
+          - -printf
+          - '%f\n'
+        chdir: /tmp
+      register: ca_ssl_entries
+      changed_when: false
+      check_mode: false
+
+- name: Bootstrap OpenVox CA on ca01 only
+  hosts: ca01
+  become: true
+  gather_facts: false
+  vars:
+    openvox_ca_bootstrap_confirm: false
+    ca_mount: /srv/openvox-ca
+    ca_certname: ca01.lab.example
+    ca_cli: /opt/puppetlabs/bin/puppetserver
+  tasks:
+    - name: Require ca02 present in inventory and inspected
+      ansible.builtin.assert:
+        that:
+          - "'ca02' in groups['ca']"
+          - hostvars['ca02'].ca_service_state is defined
+          - hostvars['ca02'].ca_service_state.stdout | trim != 'active'
+          - hostvars['ca02'].ca_mount_result.stdout == ca_mount_result.stdout
+
+    - name: Determine CA state from shared directory listing
+      ansible.builtin.set_fact:
+        ca_is_empty: "{{ (ca_entries.stdout_lines | length) == 0 }}"
+        ca_has_ca_cert: "{{ 'ca_crt.pem' in ca_entries.stdout_lines }}"
+        ca_has_ca_key: "{{ 'ca_key.pem' in ca_entries.stdout_lines }}"
+
+    - name: Refuse ambiguous or partially initialized CA state
+      ansible.builtin.assert:
+        that:
+          - ca_is_empty or (ca_has_ca_cert and ca_has_ca_key)
+        fail_msg: >-
+          Shared CA storage is nonempty but lacks a complete CA cert/key pair.
+          Manual inspection required; never rerun setup automatically.
+
+    - name: Refuse local SSL leftovers before fresh bootstrap
+      ansible.builtin.assert:
+        that:
+          - ca_ssl_entries.stdout_lines | length == 0
+        fail_msg: >-
+          ca01 local SSL directory is not empty. Inspect before any new CA setup.
+      when: ca_is_empty
+
+    - name: Explain planned operation
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Existing CA detected; setup will NOT run.' if not ca_is_empty else
+             'Fresh CA candidate; setup will run only with explicit confirmation and outside --check.' }}
+
+    - name: Report existing CA without modifying it
+      ansible.builtin.debug:
+        msg: >-
+          Existing CA certificate and key found; setup skipped. This is not a
+          cryptographic health check; validate CA certificate, key, CRL and
+          local server SSL separately.
+      when: not ca_is_empty
+
+    - name: Run initial CA setup once, explicitly authorized
+      ansible.builtin.command:
+        argv:
+          - /sbin/runuser
+          - -u
+          - puppet
+          - --
+          - "{{ ca_cli }}"
+          - ca
+          - setup
+          - --certname
+          - "{{ ca_certname }}"
+        chdir: /tmp
+      register: ca_setup_result
+      no_log: true
+      when:
+        - ca_is_empty
+        - not ansible_check_mode
+        - openvox_ca_bootstrap_confirm | bool
+
+    - name: Explain why setup was skipped
+      ansible.builtin.debug:
+        msg: >-
+          CA setup not executed (check mode or explicit confirmation absent).
+          To execute after reviewing preflight: -e openvox_ca_bootstrap_confirm=true
+      when:
+        - ca_is_empty
+        - ansible_check_mode or not (openvox_ca_bootstrap_confirm | bool)
+
+    - name: Reinspect CA entries after setup
+      ansible.builtin.command:
+        argv: [/sbin/runuser, -u, puppet, --, find, "{{ ca_mount }}", -mindepth, '1', -maxdepth, '1', -printf, '%f\n']
+        chdir: /tmp
+      register: ca_entries_after
+      changed_when: false
+      check_mode: false
+      when: ca_setup_result is not skipped
+
+    - name: Assert CA key and certificate exist after setup
+      ansible.builtin.assert:
+        that:
+          - "'ca_crt.pem' in ca_entries_after.stdout_lines"
+          - "'ca_key.pem' in ca_entries_after.stdout_lines"
+        fail_msg: 'CA setup returned but key/certificate are missing; inspect manually.'
+      when: ca_setup_result is not skipped

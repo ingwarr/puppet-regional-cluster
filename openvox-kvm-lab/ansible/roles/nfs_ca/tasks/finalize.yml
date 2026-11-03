@@ -1,0 +1,17 @@
+---
+- name: Require validated service UID/GID
+  ansible.builtin.assert:
+    that:
+      - nfs_ca_owner_uid is defined
+      - nfs_ca_owner_gid is defined
+      - (nfs_ca_owner_uid | string) is match('^[0-9]+$')
+      - (nfs_ca_owner_gid | string) is match('^[0-9]+$')
+    fail_msg: 'Pass numeric UID/GID validated on both CA nodes before finalizing NFS.'
+
+- name: Set CA export root ownership (non-recursive)
+  ansible.builtin.file:
+    path: '{{ nfs_ca_export }}'
+    state: directory
+    owner: '{{ nfs_ca_owner_uid | string }}'
+    group: '{{ nfs_ca_owner_gid | string }}'
+    mode: '0700'

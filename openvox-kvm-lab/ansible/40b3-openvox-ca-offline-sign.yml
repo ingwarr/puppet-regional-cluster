@@ -1,0 +1,195 @@
+---
+# Laboratory planned-maintenance CA-client signing.
+# Default: read-only preflight. Apply explicitly with -e ca_sign_mode=apply -e ca_sign_approved=true.
+- name: Inspect standby and obtain existing CSR
+  hosts: ca02
+  gather_facts: false
+  become: true
+  vars:
+    csr_path: /var/lib/openvox-ca-standby/ca02.lab.example.csr
+  tasks:
+    - name: Inspect standby puppetserver state
+      ansible.builtin.command: systemctl is-active puppetserver.service
+      register: standby_active
+      changed_when: false
+      failed_when: standby_active.rc not in [0, 3, 4]
+    - name: Check standby is masked and inactive
+      ansible.builtin.shell: |
+        set -euo pipefail
+        test "$(systemctl is-enabled puppetserver.service)" = masked
+        test "$(systemctl is-active puppetserver.service || true)" != active
+        ! ss -H -ltn '( sport = :8140 )' | grep -q .
+      args: {executable: /bin/bash}
+      changed_when: false
+    - name: Read existing CSR
+      ansible.builtin.slurp:
+        src: "{{ csr_path }}"
+      register: standby_csr
+      no_log: true
+
+- name: Check or sign ca02 CSR offline on ca01
+  hosts: ca01
+  gather_facts: false
+  become: true
+  vars:
+    ca_sign_mode: check
+    ca_sign_approved: false
+    ca_csr_stage: /var/tmp/ca02.lab.example.offline-sign.csr
+    ca_script_path: /var/tmp/openvox-ca-offline-sign.rb
+  tasks:
+    - name: Validate mode and explicit approval
+      ansible.builtin.assert:
+        that:
+          - ca_sign_mode in ['check', 'apply', 'verify']
+          - ca_sign_mode != 'apply' or (ca_sign_approved | bool)
+          - ca_sign_mode != 'apply' or (ca_sign_maintenance_confirm | default(false) | bool)
+          - ca_sign_mode != 'apply' or (ca_external_fencing_confirm | default(false) | bool)
+          - ca_sign_mode != 'apply' or (ca_ttl_seconds | default(0) | int > 0)
+          - groups['ca'] | length == 2
+        fail_msg: 'Apply requires approval, maintenance confirmation, external fencing confirmation, and explicit ca_ttl_seconds. No automatic fencing is provided.'
+    - name: Validate NFS and CA symlink
+      ansible.builtin.shell: |
+        set -euo pipefail
+        test "$(readlink -f /etc/puppetlabs/puppetserver/ca)" = /srv/openvox-ca
+        test "$(findmnt -n -o SOURCE --mountpoint /srv/openvox-ca)" = '192.168.122.163:/srv/nfs/openvox-ca'
+        test "$(findmnt -n -o FSTYPE --mountpoint /srv/openvox-ca)" = nfs4
+      args: {executable: /bin/bash}
+      changed_when: false
+    - name: Check local CA is running before planned maintenance
+      ansible.builtin.command: systemctl is-active puppetserver.service
+      register: primary_state
+      changed_when: false
+      failed_when: primary_state.rc not in [0, 3, 4]
+      when: ca_sign_mode == 'apply'
+    - name: Require ca01 running at start of apply
+      ansible.builtin.assert:
+        that: primary_state.stdout == 'active'
+      when: ca_sign_mode == 'apply'
+    - name: Install CSR in local temporary staging
+      ansible.builtin.copy:
+        content: "{{ hostvars['ca02']['standby_csr']['content'] | b64decode }}"
+        dest: "{{ ca_csr_stage }}"
+        owner: puppet
+        group: puppet
+        mode: '0600'
+      no_log: true
+    - name: Install offline signing helper
+      ansible.builtin.copy:
+        src: files/openvox-ca-offline-sign.rb
+        dest: "{{ ca_script_path }}"
+        owner: root
+        group: root
+        mode: '0644'
+    - name: Run read-only certificate preflight
+      ansible.builtin.command:
+        argv:
+          - /opt/puppetlabs/puppet/bin/ruby
+          - "{{ ca_script_path }}"
+          - --mode
+          - "{{ 'verify' if ca_sign_mode == 'verify' else 'check' }}"
+          - --csr
+          - "{{ ca_csr_stage }}"
+      become_user: puppet
+      register: ca_preflight
+      changed_when: false
+      when: ca_sign_mode != 'apply'
+    - name: Show preflight result
+      ansible.builtin.debug:
+        var: ca_preflight.stdout
+      when: ca_sign_mode != 'apply'
+    - name: Apply offline signing during maintenance
+      when: ca_sign_mode == 'apply'
+      block:
+        - name: Stop and mask primary CA
+          ansible.builtin.systemd_service:
+            name: puppetserver
+            state: stopped
+            enabled: false
+            masked: true
+        - name: Verify primary service is stopped and listener absent
+          ansible.builtin.shell: |
+            set -euo pipefail
+            test "$(systemctl is-active puppetserver.service || true)" != active
+            test "$(systemctl is-enabled puppetserver.service)" = masked
+            ! ss -H -ltn '( sport = :8140 )' | grep -q .
+          args: {executable: /bin/bash}
+          changed_when: false
+        - name: Recheck standby is still stopped and masked
+          ansible.builtin.shell: |
+            set -euo pipefail
+            test "$(systemctl is-enabled puppetserver.service)" = masked
+            test "$(systemctl is-active puppetserver.service || true)" != active
+            ! ss -H -ltn '( sport = :8140 )' | grep -q .
+          args: {executable: /bin/bash}
+          delegate_to: ca02
+          changed_when: false
+        - name: Confirm no puppetserver Java process remains on primary
+          ansible.builtin.shell: |
+            if pgrep -af '[j]ava.*puppet-server-release.jar'; then exit 1; fi
+          changed_when: false
+        - name: Confirm no puppetserver Java process remains on standby
+          ansible.builtin.shell: |
+            if pgrep -af '[j]ava.*puppet-server-release.jar'; then exit 1; fi
+          delegate_to: ca02
+          changed_when: false
+        - name: Back up CA PKI locally before modification
+          ansible.builtin.shell: |
+            set -euo pipefail
+            umask 077
+            backup_dir=/var/tmp/openvox-ca-offline-backups
+            mkdir -p "$backup_dir"
+            stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+            archive="$backup_dir/ca-before-ca02-$stamp.tar.gz"
+            test ! -e "$archive"
+            tar -C /srv/openvox-ca -czf "$archive" \
+              ca_crt.pem ca_key.pem ca_crl.pem serial inventory.txt signed
+            chmod 0600 "$archive"
+            printf 'Backup saved at %s\n' "$archive"
+          args:
+            executable: /bin/bash
+          become_user: puppet
+          register: ca_backup
+          changed_when: true
+          no_log: true
+        - name: Confirm local PKI backup created
+          ansible.builtin.debug:
+            msg: 'Restricted PKI backup created on ca01 under /var/tmp/openvox-ca-offline-backups (puppet-owned, mode 0600).'
+        - name: Offline sign using installed CA library
+          ansible.builtin.command:
+            argv:
+              - /opt/puppetlabs/puppet/bin/ruby
+              - "{{ ca_script_path }}"
+              - --mode
+              - apply
+              - --csr
+              - "{{ ca_csr_stage }}"
+          environment:
+            OPENVOX_CA_TTL_SECONDS: "{{ ca_ttl_seconds | string }}"
+          become_user: puppet
+          register: sign_result
+          changed_when: true
+        - name: Verify signed certificate and inventory
+          ansible.builtin.command:
+            argv:
+              - /opt/puppetlabs/puppet/bin/ruby
+              - "{{ ca_script_path }}"
+              - --mode
+              - verify
+              - --csr
+              - "{{ ca_csr_stage }}"
+          become_user: puppet
+          changed_when: false
+        - name: Report completed offline operation
+          ansible.builtin.debug:
+            msg: 'Signed and verified. ca01 remains STOPPED and MASKED; manually restore service only after review.'
+      rescue:
+        - name: Ensure primary remains stopped and masked on failure
+          ansible.builtin.systemd_service:
+            name: puppetserver
+            state: stopped
+            enabled: false
+            masked: true
+          ignore_errors: true
+        - name: Stop after failure without automatic CA restart
+          ansible.builtin.fail:
+            msg: 'Offline signing failed. ca01 should remain stopped/masked. Inspect PKI serial/inventory/signed certificate before any restart or retry.'

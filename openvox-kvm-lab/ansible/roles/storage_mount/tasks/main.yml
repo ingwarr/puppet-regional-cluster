@@ -1,0 +1,100 @@
+---
+- name: Validate storage mount definitions
+  ansible.builtin.assert:
+    that:
+      - storage_mounts is sequence
+      - storage_mounts is not string
+      - item.name is defined
+      - item.path is defined
+      - item.src is defined
+      - item.fstype is defined
+      - item.fstype in ['nfs', 'nfs4']
+      - item.path is match('^/[^\s]*$')
+    fail_msg: 'Invalid storage_mounts item (requires name, absolute path, src, nfs/nfs4 fstype).'
+  loop: '{{ storage_mounts }}'
+  loop_control:
+    label: '{{ item.name | default("unnamed") }}'
+
+- name: Install NFS client utilities
+  ansible.builtin.dnf:
+    name: nfs-utils
+    state: present
+  when: storage_mounts | length > 0
+
+- name: Check whether mountpoints are already mounted
+  ansible.builtin.command:
+    argv:
+      - findmnt
+      - --mountpoint
+      - "{{ item.path }}"
+      - --noheadings
+  register: storage_mount_existing
+  changed_when: false
+  failed_when: storage_mount_existing.rc not in [0, 1]
+  check_mode: false
+  loop: "{{ storage_mounts }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Ensure unmounted mountpoint directories exist
+  ansible.builtin.file:
+    path: "{{ item.item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop: "{{ storage_mount_existing.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+  when: item.rc == 1
+
+# - name: Ensure mountpoint directories exist
+#   ansible.builtin.file:
+#     path: '{{ item.path }}'
+#     state: directory
+#     owner: root
+#     group: root
+#     mode: '0755'
+#   loop: '{{ storage_mounts }}'
+#   loop_control:
+#     label: '{{ item.path }}'
+
+- name: Mount configured storage persistently
+  ansible.posix.mount:
+    path: '{{ item.path }}'
+    src: '{{ item.src }}'
+    fstype: '{{ item.fstype }}'
+    opts: '{{ item.opts | default("rw,vers=4.2,hard,_netdev") }}'
+    state: mounted
+  loop: '{{ storage_mounts }}'
+  loop_control:
+    label: '{{ item.name }}'
+
+- name: Inspect active mounts
+  ansible.builtin.command:
+    argv:
+      - findmnt
+      - --mountpoint
+      - "{{ item.path }}"
+      - --noheadings
+      - --output
+      - SOURCE,FSTYPE
+  register: storage_mount_inspections
+  changed_when: false
+  check_mode: false
+  loop: "{{ storage_mounts }}"
+  loop_control:
+    label: "{{ item.path }}"
+  when: not ansible_check_mode
+
+- name: Confirm expected source and filesystem type
+  ansible.builtin.assert:
+    that:
+      - item.stdout.split() | length == 2
+      - item.stdout.split()[0] == item.item.src
+      - item.stdout.split()[1] == item.item.fstype
+    fail_msg: 'Mounted source/type differs from requested storage: {{ item.stdout | default("missing") }}'
+  loop: '{{ storage_mount_inspections.results | default([]) }}'
+  loop_control:
+    label: '{{ item.item.name }}'
+  when: not ansible_check_mode

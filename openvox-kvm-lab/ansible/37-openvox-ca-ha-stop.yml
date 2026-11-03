@@ -1,0 +1,10 @@
+---
+- name: Explicitly stop and mask both CA services
+  hosts: ca
+  become: true
+  gather_facts: false
+  serial: 1
+  roles:
+    - role: openvox_ca_ha
+      vars:
+        openvox_ca_ha_action: stop

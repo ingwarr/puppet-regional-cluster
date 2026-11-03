@@ -1,0 +1,195 @@
+Compiled from "certificate_authority.clj"
+public final class puppetlabs.puppetserver.certificate_authority$fn__38194$allowed_extension_QMARK___38199$fn__38200 extends clojure.lang.AFunction {
+  java.lang.Object G__38193;
+
+  public static final clojure.lang.Var const__2;
+
+  public static final clojure.lang.Var const__3;
+
+  public static final clojure.lang.Var const__4;
+
+  public static final clojure.lang.Var const__5;
+
+  public static final clojure.lang.Var const__6;
+
+  public static final clojure.lang.Var const__7;
+
+  public static final clojure.lang.Var const__8;
+
+  static final clojure.lang.KeywordLookupSite __site__0__;
+
+  static clojure.lang.ILookupThunk __thunk__0__;
+
+  public puppetlabs.puppetserver.certificate_authority$fn__38194$allowed_extension_QMARK___38199$fn__38200(java.lang.Object);
+    Code:
+       0: aload_0
+       1: invokespecial #12                 // Method clojure/lang/AFunction."<init>":()V
+       4: aload_0
+       5: aload_1
+       6: putfield      #14                 // Field G__38193:Ljava/lang/Object;
+       9: return
+
+  public java.lang.Object invoke();
+    Code:
+       0: aload_0
+       1: getfield      #14                 // Field G__38193:Ljava/lang/Object;
+       4: aload_0
+       5: aconst_null
+       6: putfield      #14                 // Field G__38193:Ljava/lang/Object;
+       9: astore_1
+      10: getstatic     #20                 // Field __thunk__0__:Lclojure/lang/ILookupThunk;
+      13: dup
+      14: aload_1
+      15: aconst_null
+      16: astore_1
+      17: dup_x2
+      18: invokeinterface #26,  2           // InterfaceMethod clojure/lang/ILookupThunk.get:(Ljava/lang/Object;)Ljava/lang/Object;
+      23: dup_x2
+      24: if_acmpeq     31
+      27: pop
+      28: goto          53
+      31: swap
+      32: pop
+      33: dup
+      34: getstatic     #30                 // Field __site__0__:Lclojure/lang/KeywordLookupSite;
+      37: swap
+      38: invokeinterface #36,  2           // InterfaceMethod clojure/lang/ILookupSite.fault:(Ljava/lang/Object;)Lclojure/lang/ILookupThunk;
+      43: dup
+      44: putstatic     #20                 // Field __thunk__0__:Lclojure/lang/ILookupThunk;
+      47: swap
+      48: invokeinterface #26,  2           // InterfaceMethod clojure/lang/ILookupThunk.get:(Ljava/lang/Object;)Ljava/lang/Object;
+      53: astore_2
+      54: getstatic     #40                 // Field const__2:Lclojure/lang/Var;
+      57: invokevirtual #45                 // Method clojure/lang/Var.getRawRoot:()Ljava/lang/Object;
+      60: aload_2
+      61: invokestatic  #51                 // Method clojure/lang/Util.equiv:(Ljava/lang/Object;Ljava/lang/Object;)Z
+      64: istore_3
+      65: iload_3
+      66: ifeq          86
+      69: iload_3
+      70: ifeq          79
+      73: getstatic     #57                 // Field java/lang/Boolean.TRUE:Ljava/lang/Boolean;
+      76: goto          82
+      79: getstatic     #60                 // Field java/lang/Boolean.FALSE:Ljava/lang/Boolean;
+      82: goto          258
+      85: athrow
+      86: getstatic     #63                 // Field const__3:Lclojure/lang/Var;
+      89: invokevirtual #45                 // Method clojure/lang/Var.getRawRoot:()Ljava/lang/Object;
+      92: checkcast     #65                 // class clojure/lang/IFn
+      95: getstatic     #68                 // Field const__4:Lclojure/lang/Var;
+      98: invokevirtual #45                 // Method clojure/lang/Var.getRawRoot:()Ljava/lang/Object;
+     101: aload_2
+     102: invokeinterface #71,  3           // InterfaceMethod clojure/lang/IFn.invoke:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+     107: astore        4
+     109: aload         4
+     111: dup
+     112: ifnull        160
+     115: getstatic     #60                 // Field java/lang/Boolean.FALSE:Ljava/lang/Boolean;
+     118: if_acmpeq     161
+     121: getstatic     #74                 // Field const__5:Lclojure/lang/Var;
+     124: invokevirtual #45                 // Method clojure/lang/Var.getRawRoot:()Ljava/lang/Object;
+     127: checkcast     #65                 // class clojure/lang/IFn
+     130: getstatic     #77                 // Field const__6:Lclojure/lang/Var;
+     133: invokevirtual #45                 // Method clojure/lang/Var.getRawRoot:()Ljava/lang/Object;
+     136: aload_2
+     137: invokestatic  #51                 // Method clojure/lang/Util.equiv:(Ljava/lang/Object;Ljava/lang/Object;)Z
+     140: ifeq          149
+     143: getstatic     #57                 // Field java/lang/Boolean.TRUE:Ljava/lang/Boolean;
+     146: goto          152
+     149: getstatic     #60                 // Field java/lang/Boolean.FALSE:Ljava/lang/Boolean;
+     152: invokeinterface #79,  2           // InterfaceMethod clojure/lang/IFn.invoke:(Ljava/lang/Object;)Ljava/lang/Object;
+     157: goto          166
+     160: pop
+     161: aload         4
+     163: aconst_null
+     164: astore        4
+     166: astore        4
+     168: aload         4
+     170: dup
+     171: ifnull        188
+     174: getstatic     #60                 // Field java/lang/Boolean.FALSE:Ljava/lang/Boolean;
+     177: if_acmpeq     189
+     180: aload         4
+     182: aconst_null
+     183: astore        4
+     185: goto          258
+     188: pop
+     189: getstatic     #63                 // Field const__3:Lclojure/lang/Var;
+     192: invokevirtual #45                 // Method clojure/lang/Var.getRawRoot:()Ljava/lang/Object;
+     195: checkcast     #65                 // class clojure/lang/IFn
+     198: getstatic     #83                 // Field const__7:Lclojure/lang/Var;
+     201: invokevirtual #45                 // Method clojure/lang/Var.getRawRoot:()Ljava/lang/Object;
+     204: aload_2
+     205: invokeinterface #71,  3           // InterfaceMethod clojure/lang/IFn.invoke:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+     210: astore        5
+     212: aload         5
+     214: dup
+     215: ifnull        232
+     218: getstatic     #60                 // Field java/lang/Boolean.FALSE:Ljava/lang/Boolean;
+     221: if_acmpeq     233
+     224: aload         5
+     226: aconst_null
+     227: astore        5
+     229: goto          258
+     232: pop
+     233: getstatic     #63                 // Field const__3:Lclojure/lang/Var;
+     236: invokevirtual #45                 // Method clojure/lang/Var.getRawRoot:()Ljava/lang/Object;
+     239: checkcast     #65                 // class clojure/lang/IFn
+     242: getstatic     #86                 // Field const__8:Lclojure/lang/Var;
+     245: invokevirtual #45                 // Method clojure/lang/Var.getRawRoot:()Ljava/lang/Object;
+     248: aload_2
+     249: aconst_null
+     250: astore_2
+     251: aconst_null
+     252: astore_0
+     253: invokeinterface #71,  3           // InterfaceMethod clojure/lang/IFn.invoke:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+     258: areturn
+
+  public static {};
+    Code:
+       0: ldc           #100                // String puppetlabs.puppetserver.certificate-authority
+       2: ldc           #102                // String subject-alt-names-oid
+       4: invokestatic  #108                // Method clojure/lang/RT.var:(Ljava/lang/String;Ljava/lang/String;)Lclojure/lang/Var;
+       7: checkcast     #42                 // class clojure/lang/Var
+      10: putstatic     #40                 // Field const__2:Lclojure/lang/Var;
+      13: ldc           #110                // String puppetlabs.ssl-utils.core
+      15: ldc           #112                // String subtree-of?
+      17: invokestatic  #108                // Method clojure/lang/RT.var:(Ljava/lang/String;Ljava/lang/String;)Lclojure/lang/Var;
+      20: checkcast     #42                 // class clojure/lang/Var
+      23: putstatic     #63                 // Field const__3:Lclojure/lang/Var;
+      26: ldc           #100                // String puppetlabs.puppetserver.certificate-authority
+      28: ldc           #114                // String ppAuthCertExt
+      30: invokestatic  #108                // Method clojure/lang/RT.var:(Ljava/lang/String;Ljava/lang/String;)Lclojure/lang/Var;
+      33: checkcast     #42                 // class clojure/lang/Var
+      36: putstatic     #68                 // Field const__4:Lclojure/lang/Var;
+      39: ldc           #116                // String clojure.core
+      41: ldc           #118                // String not
+      43: invokestatic  #108                // Method clojure/lang/RT.var:(Ljava/lang/String;Ljava/lang/String;)Lclojure/lang/Var;
+      46: checkcast     #42                 // class clojure/lang/Var
+      49: putstatic     #74                 // Field const__5:Lclojure/lang/Var;
+      52: ldc           #100                // String puppetlabs.puppetserver.certificate-authority
+      54: ldc           #120                // String cli-auth-oid
+      56: invokestatic  #108                // Method clojure/lang/RT.var:(Ljava/lang/String;Ljava/lang/String;)Lclojure/lang/Var;
+      59: checkcast     #42                 // class clojure/lang/Var
+      62: putstatic     #77                 // Field const__6:Lclojure/lang/Var;
+      65: ldc           #100                // String puppetlabs.puppetserver.certificate-authority
+      67: ldc           #122                // String ppRegCertExt
+      69: invokestatic  #108                // Method clojure/lang/RT.var:(Ljava/lang/String;Ljava/lang/String;)Lclojure/lang/Var;
+      72: checkcast     #42                 // class clojure/lang/Var
+      75: putstatic     #83                 // Field const__7:Lclojure/lang/Var;
+      78: ldc           #100                // String puppetlabs.puppetserver.certificate-authority
+      80: ldc           #124                // String ppPrivCertExt
+      82: invokestatic  #108                // Method clojure/lang/RT.var:(Ljava/lang/String;Ljava/lang/String;)Lclojure/lang/Var;
+      85: checkcast     #42                 // class clojure/lang/Var
+      88: putstatic     #86                 // Field const__8:Lclojure/lang/Var;
+      91: new           #126                // class clojure/lang/KeywordLookupSite
+      94: dup
+      95: aconst_null
+      96: ldc           #127                // String oid
+      98: invokestatic  #131                // Method clojure/lang/RT.keyword:(Ljava/lang/String;Ljava/lang/String;)Lclojure/lang/Keyword;
+     101: invokespecial #134                // Method clojure/lang/KeywordLookupSite."<init>":(Lclojure/lang/Keyword;)V
+     104: dup
+     105: putstatic     #30                 // Field __site__0__:Lclojure/lang/KeywordLookupSite;
+     108: putstatic     #20                 // Field __thunk__0__:Lclojure/lang/ILookupThunk;
+     111: return
+}

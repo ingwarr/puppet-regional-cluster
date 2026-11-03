@@ -1,0 +1,50 @@
+---
+- name: Require RHEL-compatible 9 system and PostgreSQL inventory
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] == 'RedHat'
+      - ansible_facts['distribution_major_version'] == '9'
+      - "'postgresql' in groups"
+      - groups['postgresql'] | length == 3
+      - groups['postgresql'] | difference(groups['all']) | length == 0
+    fail_msg: "Unsupported OS or invalid PostgreSQL inventory"
+    success_msg: "HAProxy prerequisites verified"
+
+- name: Install HAProxy
+  ansible.builtin.dnf:
+    name: haproxy
+    state: present
+
+- name: Allow HAProxy to connect to PostgreSQL and Patroni ports under SELinux
+  ansible.builtin.command: setsebool -P haproxy_connect_any on
+  when: ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
+  register: haproxy_selinux_result
+  changed_when: false
+  # setsebool is invoked on each run but reports no change; a later revision can
+  # replace this with community.general.seboolean for stateful idempotence.
+
+- name: Deploy validated HAProxy configuration
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    owner: root
+    group: root
+    mode: '0644'
+    validate: 'haproxy -c -f %s'
+  notify: Reload HAProxy
+
+- name: Open PostgreSQL writer port in firewalld
+  ansible.posix.firewalld:
+    port: "{{ haproxy_postgresql_port | default(5432) }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+
+- name: Enable and start HAProxy
+  ansible.builtin.systemd_service:
+    name: haproxy
+    state: started
+    enabled: true
+
+- name: Apply pending reload before validation
+  ansible.builtin.meta: flush_handlers

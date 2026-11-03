@@ -1,0 +1,24 @@
+---
+- name: Configure HAProxy PostgreSQL writer endpoint
+  hosts: ha01
+  become: true
+  gather_facts: true
+  roles:
+    - haproxy
+
+- name: Validate PostgreSQL writer route
+  hosts: ha01
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Check HAProxy configuration
+      ansible.builtin.command:
+        argv: [haproxy, -c, -f, /etc/haproxy/haproxy.cfg]
+      changed_when: false
+
+    - name: Check HAProxy TCP listener
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: "{{ haproxy_postgresql_port | default(5432) }}"
+        timeout: 15
+      changed_when: false

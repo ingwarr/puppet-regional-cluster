@@ -1,0 +1,6 @@
+---
+- name: Prepare NFS server (does not require OpenVox account)
+  hosts: nfs
+  become: true
+  roles:
+    - nfs_ca

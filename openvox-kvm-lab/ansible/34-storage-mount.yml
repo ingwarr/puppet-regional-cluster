@@ -1,0 +1,14 @@
+---
+- name: Mount shared storage on CA nodes (generic storage_mount role)
+  hosts: ca
+  become: true
+  gather_facts: true
+  vars:
+    storage_mounts:
+      - name: ca-shared-state
+        path: /srv/openvox-ca
+        src: 192.168.122.163:/srv/nfs/openvox-ca
+        fstype: nfs4
+        opts: rw,vers=4.2,hard,_netdev
+  roles:
+    - storage_mount

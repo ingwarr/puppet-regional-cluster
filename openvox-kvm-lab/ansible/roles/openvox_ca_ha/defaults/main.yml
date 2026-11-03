@@ -1,0 +1,6 @@
+---
+openvox_ca_ha_mount: /srv/openvox-ca
+openvox_ca_ha_expected_source: 192.168.122.163:/srv/nfs/openvox-ca
+openvox_ca_ha_service: puppetserver
+openvox_ca_ha_action: inspect
+openvox_ca_ha_nodes: "{{ groups['ca'] }}"

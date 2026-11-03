@@ -1,0 +1,3 @@
+---
+# Backward compatible: calling the role normally prepares NFS only.
+- ansible.builtin.import_tasks: prepare.yml

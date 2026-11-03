@@ -1,0 +1,17 @@
+---
+- name: Read-only CA HA preflight
+  hosts: ca
+  become: true
+  gather_facts: false
+  roles:
+    - role: openvox_ca_ha
+      vars:
+        openvox_ca_ha_action: inspect
+  post_tasks:
+    - name: Ensure no more than one CA service is active
+      ansible.builtin.assert:
+        that:
+          - (ansible_play_hosts_all | map('extract', hostvars, 'ca_service_active') | map(attribute='stdout') | select('equalto', 'active') | list | length) <= 1
+        fail_msg: 'CRITICAL: more than one CA service is active!'
+      run_once: true
+      when: not ansible_check_mode

@@ -1,0 +1,82 @@
+---
+- name: Link OpenVox CA directory to shared storage
+  hosts: ca
+  become: true
+  gather_facts: false
+
+  vars:
+    ca_local_path: /etc/puppetlabs/puppetserver/ca
+    ca_shared_path: /srv/openvox-ca
+
+  tasks:
+    - name: Verify shared storage is mounted
+      ansible.builtin.command:
+        argv:
+          - findmnt
+          - -n
+          - -T
+          - "{{ ca_shared_path }}"
+          - -o
+          - SOURCE,FSTYPE
+      register: ca_mount
+      changed_when: false
+      check_mode: false
+
+    - name: Assert expected NFS filesystem
+      ansible.builtin.assert:
+        that:
+          - "'192.168.122.163:/srv/nfs/openvox-ca' in ca_mount.stdout"
+          - "'nfs4' in ca_mount.stdout"
+
+    - name: Inspect existing CA path
+      ansible.builtin.stat:
+        path: "{{ ca_local_path }}"
+        follow: false
+      register: ca_local_stat
+
+    - name: Refuse to replace existing CA directory or file
+      ansible.builtin.assert:
+        that:
+          - >-
+            not ca_local_stat.stat.exists
+            or (
+              ca_local_stat.stat.islnk | default(false)
+              and ca_local_stat.stat.lnk_source | default('') == ca_shared_path
+            )
+        fail_msg: "CA path exists and is not the expected symlink. Refusing to replace it."
+
+    - name: Ensure parent directory exists
+      ansible.builtin.file:
+        path: "{{ ca_local_path | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Create CA symlink to shared storage
+      ansible.builtin.file:
+        src: "{{ ca_shared_path }}"
+        dest: "{{ ca_local_path }}"
+        state: link
+        force: false
+
+    - name: Verify resulting CA symlink
+      ansible.builtin.stat:
+        path: "{{ ca_local_path }}"
+        follow: false
+      register: ca_link
+
+    - name: Verify resulting CA symlink
+      ansible.builtin.stat:
+        path: "{{ ca_local_path }}"
+        follow: false
+      register: ca_link
+      check_mode: false
+
+    - name: Assert correct link
+      ansible.builtin.assert:
+        that:
+          - ca_link.stat.islnk | default(false)
+          - ca_link.stat.lnk_source | default('') == ca_shared_path
+        fail_msg: "CA symlink is missing or points to an unexpected location."
+      when: not ansible_check_mode

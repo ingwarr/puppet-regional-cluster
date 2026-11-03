@@ -1,0 +1,6 @@
+---
+nfs_ca_device: /dev/vdb
+nfs_ca_mount: /srv/nfs
+nfs_ca_export: /srv/nfs/openvox-ca
+nfs_ca_clients: "{{ groups['ca'] | map('extract', hostvars, 'ansible_host') | list }}"
+nfs_ca_allow_format: false

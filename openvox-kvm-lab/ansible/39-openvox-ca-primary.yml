@@ -1,0 +1,241 @@
+---
+# Controlled first start of ca01. Never starts ca02 or regenerates PKI.
+# Run from ansible/ with inventory ../generated/hosts.ini.
+- name: Gate primary CA startup against standby state
+  hosts: ca02
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Confirm standby is masked and inactive
+      ansible.builtin.shell: |
+        set -euo pipefail
+        test "$(systemctl is-enabled puppetserver.service)" = masked
+        test "$(systemctl is-active puppetserver.service || true)" != active
+        ! ss -H -ltn '( sport = :8140 )' | grep -q .
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+
+    - name: Verify standby shared CA path and expected NFS source
+      ansible.builtin.shell: |
+        set -euo pipefail
+        test "$(readlink -f /etc/puppetlabs/puppetserver/ca)" = /srv/openvox-ca
+        test "$(findmnt -n -o SOURCE --mountpoint /srv/openvox-ca)" = '192.168.122.163:/srv/nfs/openvox-ca'
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Verify standby CA files are readable by puppet
+      ansible.builtin.command:
+        argv:
+          - /bin/sh
+          - -c
+          - |
+            test -s /etc/puppetlabs/puppetserver/ca/ca_crt.pem &&
+            test -s /etc/puppetlabs/puppetserver/ca/ca_key.pem
+      become: true
+      become_user: puppet
+      changed_when: false
+      check_mode: false
+
+- name: Verify and optionally start primary OpenVox CA
+  hosts: ca01
+  become: true
+  gather_facts: false
+  vars:
+    ca_certname: ca01.lab.example
+    ca_dir: /etc/puppetlabs/puppetserver/ca
+    ssl_dir: /etc/puppetlabs/puppet/ssl
+    expected_nfs_source: 192.168.122.163:/srv/nfs/openvox-ca
+    ca_primary_confirm: "{{ openvox_ca_primary_confirm | default(false) | bool }}"
+  tasks:
+    - name: Verify primary service is initially masked and inactive
+      ansible.builtin.shell: |
+        set -euo pipefail
+        test "$(systemctl is-enabled puppetserver.service)" = masked
+        test "$(systemctl is-active puppetserver.service || true)" != active
+        ! ss -H -ltn '( sport = :8140 )' | grep -q .
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+
+    - name: Verify shared CA mount and symlink
+      ansible.builtin.shell: |
+        set -euo pipefail
+        test "$(readlink -f '{{ ca_dir }}')" = /srv/openvox-ca
+        test "$(findmnt -n -o SOURCE --mountpoint /srv/openvox-ca)" = '{{ expected_nfs_source }}'
+        test "$(findmnt -n -o FSTYPE --mountpoint /srv/openvox-ca)" = nfs4
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+
+    - name: Verify CA and local SSL files as puppet
+      ansible.builtin.shell: |
+        set -euo pipefail
+        test -r '{{ ca_dir }}/ca_crt.pem'
+        test -r '{{ ca_dir }}/ca_key.pem'
+        test -r '{{ ssl_dir }}/certs/{{ ca_certname }}.pem'
+        test -r '{{ ssl_dir }}/private_keys/{{ ca_certname }}.pem'
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: puppet
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Verify Puppet effective paths as service user
+      ansible.builtin.command:
+        argv:
+          - /opt/puppetlabs/bin/puppet
+          - config
+          - print
+          - cadir
+          - ssldir
+          - certname
+          - --section
+          - server
+          - --config
+          - /etc/puppetlabs/puppet/puppet.conf
+      become_user: puppet
+      register: puppet_paths
+      changed_when: false
+      check_mode: false
+
+    - name: Assert effective paths and certname
+      ansible.builtin.assert:
+        that:
+          - "'cadir = ' ~ ca_dir in puppet_paths.stdout_lines"
+          - "'ssldir = ' ~ ssl_dir in puppet_paths.stdout_lines"
+          - "'certname = ' ~ ca_certname in puppet_paths.stdout_lines"
+
+    - name: Validate CA chain and server certificate and private keys
+      ansible.builtin.shell: |
+        set -euo pipefail
+        ca='{{ ca_dir }}'
+        ssl='{{ ssl_dir }}'
+        cn='{{ ca_certname }}'
+        test "$(openssl x509 -in "$ca/ca_crt.pem" -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum | cut -d' ' -f1)" = \
+             "$(openssl pkey -in "$ca/ca_key.pem" -pubout -outform DER | sha256sum | cut -d' ' -f1)"
+        test "$(openssl x509 -in "$ssl/certs/$cn.pem" -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum | cut -d' ' -f1)" = \
+             "$(openssl pkey -in "$ssl/private_keys/$cn.pem" -pubout -outform DER | sha256sum | cut -d' ' -f1)"
+        openssl x509 -in "$ca/ca_crt.pem" -checkend 0 -noout >/dev/null
+        openssl x509 -in "$ssl/certs/$cn.pem" -checkend 0 -noout >/dev/null
+        openssl crl -in "$ca/ca_crl.pem" -noout >/dev/null
+        openssl crl -in "$ca/infra_crl.pem" -noout >/dev/null
+        openssl verify -CAfile "$ssl/certs/ca.pem" "$ssl/certs/$cn.pem" >/dev/null
+        openssl x509 -in "$ssl/certs/$cn.pem" -noout -checkhost "$cn" >/dev/null
+      args:
+        executable: /bin/bash
+      become_user: puppet
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Capture CA identity before start
+      ansible.builtin.command:
+        argv: [openssl, x509, -in, /etc/puppetlabs/puppetserver/ca/ca_crt.pem, -noout, -fingerprint, -sha256]
+      register: ca_identity_before
+      changed_when: false
+      check_mode: false
+      become: true
+      become_user: puppet
+
+    - name: Require explicit confirmation for actual start
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or ca_primary_confirm
+        fail_msg: 'Use --check for preflight, or -e openvox_ca_primary_confirm=true for first start.'
+
+    - name: Start primary with rollback on failed verification
+      when: not ansible_check_mode
+      block:
+        - name: Unmask primary puppetserver
+          ansible.builtin.systemd_service:
+            name: puppetserver
+            masked: false
+            enabled: false
+
+        - name: Start primary puppetserver
+          ansible.builtin.systemd_service:
+            name: puppetserver
+            state: started
+            enabled: false
+
+        - name: Wait for local HTTPS port 8140
+          ansible.builtin.wait_for:
+            host: 127.0.0.1
+            port: 8140
+            state: started
+            timeout: 180
+            delay: 2
+
+        - name: Verify TLS endpoint with CA chain and hostname
+          ansible.builtin.command:
+            argv:
+              - curl
+              - --fail
+              - --silent
+              - --show-error
+              - --max-time
+              - '20'
+              - --cacert
+              - /etc/puppetlabs/puppet/ssl/certs/ca.pem
+              - --resolve
+              - '{{ ca_certname }}:8140:127.0.0.1'
+              - 'https://{{ ca_certname }}:8140/puppet-ca/v1/certificate/ca'
+          register: ca_http_response
+          changed_when: false
+          retries: 12
+          delay: 5
+          until: ca_http_response.rc == 0
+          no_log: true
+          become: true
+          become_user: puppet
+
+        - name: Confirm CA certificate identity has not changed
+          ansible.builtin.command:
+            argv: [openssl, x509, -in, /etc/puppetlabs/puppetserver/ca/ca_crt.pem, -noout, -fingerprint, -sha256]
+          register: ca_identity_after
+          changed_when: false
+          become: true
+          become_user: puppet
+          failed_when: ca_identity_after.stdout != ca_identity_before.stdout
+
+        - name: Confirm primary is running
+          ansible.builtin.command: systemctl is-active puppetserver.service
+          register: primary_active
+          changed_when: false
+          failed_when: >-
+            ca_identity_after.rc != 0 or
+            ca_identity_after.stdout != ca_identity_before.stdout
+
+      rescue:
+        - name: Stop primary after failed startup verification
+          ansible.builtin.systemd_service:
+            name: puppetserver
+            state: stopped
+          ignore_errors: true
+
+        - name: Mask primary after failed startup verification
+          ansible.builtin.systemd_service:
+            name: puppetserver
+            masked: true
+            enabled: false
+          ignore_errors: true
+
+        - name: Fail closed with instructions
+          ansible.builtin.fail:
+            msg: >-
+              Primary startup or verification failed. Attempted stop and mask on ca01.
+              Inspect systemctl status puppetserver and journalctl -u puppetserver.
+              CA files were not deleted or regenerated; do not start ca02.
+
+    - name: Report preflight or successful primary start
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Read-only preflight passed; no service changes made.' if ansible_check_mode
+             else 'ca01 primary started and HTTPS CA endpoint verified; ca02 remains masked.' }}

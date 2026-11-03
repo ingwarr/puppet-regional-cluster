@@ -1,0 +1,183 @@
+---
+# 40b2: register a pre-existing standby CSR using the running CA HTTP API.
+# Does NOT sign certificates, change CA policy, or start standby services.
+# Inventory must define groups 'ca' and active/standby host names (override with -e).
+- name: Register OpenVox standby CSR on active CA
+  hosts: "{{ openvox_ca_standby_targets | default('ca02') }}"
+  gather_facts: false
+  become: true
+  vars:
+    openvox_ca_active_host: ca01
+    openvox_ca_domain: lab.example
+    openvox_ca_service_alias: puppet
+    openvox_ca_certname: "{{ inventory_hostname }}.{{ openvox_ca_domain }}"
+    openvox_ca_csr_path: "/var/lib/openvox-ca-standby/{{ openvox_ca_certname }}.csr"
+    openvox_ca_api_url: "https://{{ openvox_ca_service_alias }}:8140/puppet-ca/v1/certificate_request/{{ openvox_ca_certname }}"
+    openvox_ca_active_certname: "{{ openvox_ca_active_host }}.{{ openvox_ca_domain }}"
+    openvox_ca_client_cert: "/etc/puppetlabs/puppet/ssl/certs/{{ openvox_ca_active_certname }}.pem"
+    openvox_ca_client_key: "/etc/puppetlabs/puppet/ssl/private_keys/{{ openvox_ca_active_certname }}.pem"
+    openvox_ca_trust_bundle: /etc/puppetlabs/puppet/ssl/certs/ca.pem
+  tasks:
+    - name: Refuse to register CSR against itself
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname != openvox_ca_active_host
+          - openvox_ca_certname != openvox_ca_active_certname
+        fail_msg: "Standby and active CA must be distinct hosts."
+
+    - name: Read prepared CSR from standby (public material only)
+      ansible.builtin.slurp:
+        src: "{{ openvox_ca_csr_path }}"
+      register: standby_csr
+
+    - name: Validate CSR signature and identity on standby
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -in
+          - "{{ openvox_ca_csr_path }}"
+          - -noout
+          - -verify
+          - -subject
+          - -nameopt
+          - RFC2253
+      check_mode: false
+      changed_when: false
+      register: csr_check
+      changed_when: false
+
+    - name: Diagnose CSR subject comparison
+      ansible.builtin.debug:
+        msg:
+          - "Expected certname: {{ openvox_ca_certname }}"
+          - "CSR stdout: {{ csr_check.stdout | to_json }}"
+          - "CSR stderr: {{ csr_check.stderr | to_json }}"
+          - "CSR return code: {{ csr_check.rc }}"
+
+    - name: Validate CSR subject
+      ansible.builtin.assert:
+        that:
+          - "(csr_check.stdout | regex_search('(?m)^subject\\s*=\\s*CN\\s*=\\s*' ~ (openvox_ca_certname | regex_escape) ~ '(?:,|$)')) is not none"
+        fail_msg: "CSR CN does not match inventory-derived certname."
+
+    - name: Confirm CA client identity and trust files exist on active
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ openvox_ca_client_cert }}"
+        - "{{ openvox_ca_client_key }}"
+        - "{{ openvox_ca_trust_bundle }}"
+      register: ca_tls_files
+      delegate_to: "{{ openvox_ca_active_host }}"
+
+    - name: Refuse missing active CA TLS material
+      ansible.builtin.assert:
+        that:
+          - ca_tls_files.results | map(attribute='stat.exists') | min
+        fail_msg: "Missing CA TLS files on active host; inspect ca_tls_files before proceeding."
+
+    - name: Check existing CSR registration on active CA
+      ansible.builtin.uri:
+        url: "{{ openvox_ca_api_url }}"
+        method: GET
+        client_cert: "{{ openvox_ca_client_cert }}"
+        client_key: "{{ openvox_ca_client_key }}"
+        ca_path: "{{ openvox_ca_trust_bundle }}"
+        validate_certs: true
+        status_code: [200, 404]
+        return_content: true
+      register: existing_csr
+      check_mode: false
+      changed_when: false
+      changed_when: false
+      delegate_to: "{{ openvox_ca_active_host }}"
+
+    - name: Verify CA API returned a usable response
+      ansible.builtin.assert:
+        that:
+          - existing_csr.status is defined
+          - existing_csr.status | int in [200, 404]
+        fail_msg: >-
+          CA API did not return HTTP 200 or 404.
+          Check whether the GET request executed and whether TLS
+          authentication succeeded.
+
+    - name: Reject a different already registered CSR
+      ansible.builtin.assert:
+        that:
+          - >-
+            (existing_csr.status | int == 404) or
+            (
+              (existing_csr.content | default('') | trim) ==
+              (standby_csr.content | b64decode | trim)
+            )
+        fail_msg: >-
+          A different CSR is already registered under this certname.
+          Refusing to overwrite it.
+
+    - name: Check whether a signed certificate already exists
+      ansible.builtin.command:
+        argv:
+          - /opt/puppetlabs/bin/puppetserver
+          - ca
+          - list
+          - --all
+          - --config
+          - /etc/puppetlabs/puppet/puppet.conf
+      register: ca_list_before
+      changed_when: false
+      delegate_to: "{{ openvox_ca_active_host }}"
+
+    - name: Refuse to register CSR for an already signed certname
+      ansible.builtin.assert:
+        that:
+          - "openvox_ca_certname not in (ca_list_before.stdout.split('Signed Certificates:')[-1].split('Requested Certificates:')[0] if 'Signed Certificates:' in ca_list_before.stdout else '')"
+        fail_msg: "A signed certificate for this certname may already exist; investigate before proceeding."
+
+    - name: Register CSR using CA API (only if not already registered)
+      ansible.builtin.uri:
+        url: "{{ openvox_ca_api_url }}"
+        method: PUT
+        client_cert: "{{ openvox_ca_client_cert }}"
+        client_key: "{{ openvox_ca_client_key }}"
+        ca_path: "{{ openvox_ca_trust_bundle }}"
+        validate_certs: true
+        headers:
+          Content-Type: text/plain
+        body: "{{ standby_csr.content | b64decode }}"
+        body_format: raw
+        status_code: [200, 201]
+        return_content: true
+      when:
+        - existing_csr.status == 404
+        - not ansible_check_mode
+      delegate_to: "{{ openvox_ca_active_host }}"
+
+    - name: Verify registered CSR is retrievable and identical
+      ansible.builtin.uri:
+        url: "{{ openvox_ca_api_url }}"
+        method: GET
+        client_cert: "{{ openvox_ca_client_cert }}"
+        client_key: "{{ openvox_ca_client_key }}"
+        ca_path: "{{ openvox_ca_trust_bundle }}"
+        validate_certs: true
+        status_code: [200]
+        return_content: true
+      register: registered_csr
+      when: not ansible_check_mode or existing_csr.status == 200
+      changed_when: false
+      delegate_to: "{{ openvox_ca_active_host }}"
+
+    - name: Assert registered CSR matches standby CSR
+      ansible.builtin.assert:
+        that:
+          - (registered_csr.content | trim) == ((standby_csr.content | b64decode) | trim)
+      when: registered_csr is not skipped
+
+    - name: Summarize stage 40b2
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'CHECK MODE: registration would be performed if missing' if ansible_check_mode
+             else 'CSR registered and verified (or already registered)' }};
+          no certificate signed; standby service unchanged.

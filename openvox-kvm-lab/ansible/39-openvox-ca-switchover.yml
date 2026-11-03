@@ -1,0 +1,28 @@
+---
+# Intentionally gated until CA state is initialized and validated.
+# Planned switchover ONLY: no unreachable-source failover.
+- name: Validate explicit operator authorization
+  hosts: localhost
+  gather_facts: false
+  vars:
+    ca_source: "{{ source_ca | default('') }}"
+    ca_target: "{{ target_ca | default('') }}"
+  tasks:
+    - name: Require explicit approval and valid distinct nodes
+      ansible.builtin.assert:
+        that:
+          - ca_switchover_approved | default(false) | bool
+          - ca_bootstrap_validated | default(false) | bool
+          - ca_source in ['ca01', 'ca02']
+          - ca_target in ['ca01', 'ca02']
+          - ca_source != ca_target
+        fail_msg: >-
+          Switchover blocked. Requires explicit source_ca, target_ca,
+          ca_bootstrap_validated=true and ca_switchover_approved=true.
+    - name: Explain safety boundary
+      ansible.builtin.fail:
+        msg: >-
+          This is a non-executable switchover specification until the actual
+          OpenVox CA configuration, service dependencies, bootstrap method,
+          endpoint routing and exclusive operation controls are validated.
+          Never start a second CA based only on ping/SSH or a shared NFS lock.

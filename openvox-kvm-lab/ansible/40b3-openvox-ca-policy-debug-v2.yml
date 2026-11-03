@@ -1,0 +1,244 @@
+---
+# Diagnostic-only CA policy window (v2: corrected lineinfile regex). NEVER signs a certificate.
+# Requires explicit approval because puppetserver is restarted twice.
+- name: Diagnose temporary OpenVox CA policy without signing
+  hosts: "{{ openvox_ca_active_host | default('ca01') }}"
+  gather_facts: false
+  become: true
+  vars:
+    openvox_ca_active_host: ca01
+    openvox_ca_standby_host: ca02
+    openvox_ca_debug_confirm: false
+    openvox_ca_conf: /etc/puppetlabs/puppetserver/conf.d/ca.conf
+    openvox_ca_backup: /etc/puppetlabs/puppetserver/conf.d/ca.conf.pre-40b3-debug
+    openvox_ca_puppet_conf: /etc/puppetlabs/puppet/puppet.conf
+  tasks:
+    - name: Verify standby is stopped and masked
+      ansible.builtin.shell: |
+        set -euo pipefail
+        test "$(systemctl is-enabled puppetserver.service)" = masked
+        test "$(systemctl is-active puppetserver.service || true)" != active
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ openvox_ca_standby_host }}"
+      changed_when: false
+      check_mode: false
+
+    - name: Verify active service is running
+      ansible.builtin.command: systemctl is-active puppetserver
+      register: active_status
+      changed_when: false
+      check_mode: false
+      failed_when: active_status.stdout | trim != 'active'
+
+    - name: Check for leftover recovery backups
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ openvox_ca_backup }}"
+        - /etc/puppetlabs/puppetserver/conf.d/ca.conf.pre-40b3
+      register: backup_checks
+      check_mode: false
+
+    - name: Refuse unresolved recovery state
+      ansible.builtin.assert:
+        that:
+          - backup_checks.results | selectattr('stat.exists') | list | length == 0
+        fail_msg: 'An old policy backup exists. Inspect and recover before proceeding.'
+
+    - name: Read original CA configuration
+      ansible.builtin.slurp:
+        src: "{{ openvox_ca_conf }}"
+      register: original_ca_conf
+      check_mode: false
+
+    - name: Check baseline policy and expected template structure
+      ansible.builtin.assert:
+        that:
+          - "(original_ca_conf.content | b64decode | regex_search('(?m)^certificate-authority:\\s*\\{\\s*$')) is not none"
+          - "(original_ca_conf.content | b64decode | regex_search('(?m)^\\s*#\\s*allow-subject-alt-names:\\s*false\\s*$')) is not none"
+          - "(original_ca_conf.content | b64decode | regex_search('(?m)^\\s*#\\s*allow-authorization-extensions:\\s*false\\s*$')) is not none"
+          - "(original_ca_conf.content | b64decode | regex_search('(?m)^\\s*allow-authorization-extensions:\\s*true\\s*$')) is none"
+          - "(original_ca_conf.content | b64decode | regex_search('(?m)^\\s*allow-subject-alt-names:\\s*true\\s*$')) is none"
+
+    - name: Require explicit consent for service restarts
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or (openvox_ca_debug_confirm | bool)
+        fail_msg: 'For live diagnostics pass -e openvox_ca_debug_confirm=true.'
+
+    - name: Show dry-run plan
+      ansible.builtin.debug:
+        msg: 'Preflight OK. Live run will temporarily enable CA flags, restart twice, collect policy and logs, restore original file. NO CERTIFICATE SIGNING.'
+      when: ansible_check_mode
+
+    - name: Temporary diagnostic window
+      when: not ansible_check_mode
+      block:
+        - name: Preserve original policy for crash recovery
+          ansible.builtin.copy:
+            src: "{{ openvox_ca_conf }}"
+            dest: "{{ openvox_ca_backup }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: '0600'
+            force: false
+
+        - name: Activate both CA policy settings
+          ansible.builtin.lineinfile:
+            path: "{{ openvox_ca_conf }}"
+            regexp: '^\s*#?\s*{{ item }}:.*$'
+            insertafter: '^certificate-authority:\s*\{'
+            line: '    {{ item }}: true'
+          loop:
+            - allow-subject-alt-names
+            - allow-authorization-extensions
+
+        - name: Read temporarily modified policy
+          ansible.builtin.slurp:
+            src: "{{ openvox_ca_conf }}"
+          register: temporary_policy
+
+        - name: Show temporary CA configuration for diagnosis
+          ansible.builtin.debug:
+            msg: "{{ temporary_policy.content | b64decode }}"
+
+        - name: Validate expected temporary policy and block boundaries
+          ansible.builtin.assert:
+            that:
+              - >-
+                (temporary_policy.content | b64decode |
+                 regex_findall('(?m)^\s*allow-subject-alt-names:\s*true\s*$') | length) == 1
+              - >-
+                (temporary_policy.content | b64decode |
+                 regex_findall('(?m)^\s*allow-authorization-extensions:\s*true\s*$') | length) == 1
+              - >-
+                (temporary_policy.content | b64decode |
+                 regex_findall('(?m)^certificate-authority:\s*\{') | length) == 1
+              - >-
+                (temporary_policy.content | b64decode |
+                 regex_findall('(?m)^\}\s*$') | length) == 1
+              - >-
+                (temporary_policy.content | b64decode |
+                 regex_search('(?s)certificate-authority:\s*\{(?:(?!\}).)*allow-subject-alt-names:\s*true(?:(?!\}).)*allow-authorization-extensions:\s*true(?:(?!\}).)*\}')) is not none
+            fail_msg: 'CA flags must each occur exactly once, inside certificate-authority block.'
+
+        - name: Restart active CA with temporary policy
+          ansible.builtin.systemd_service:
+            name: puppetserver
+            state: restarted
+
+        - name: Wait for CA HTTPS port
+          ansible.builtin.wait_for:
+            host: 127.0.0.1
+            port: 8140
+            delay: 3
+            timeout: 180
+
+        - name: Verify CA API works under temporary policy
+          ansible.builtin.command:
+            argv:
+              - /opt/puppetlabs/bin/puppetserver
+              - ca
+              - list
+              - --all
+              - --config
+              - "{{ openvox_ca_puppet_conf }}"
+          register: ca_api_ready
+          changed_when: false
+          retries: 12
+          delay: 10
+          until: ca_api_ready.rc == 0
+
+        - name: Capture process configuration arguments and policy file
+          ansible.builtin.shell: |
+            set -euo pipefail
+            pid="$(systemctl show -p MainPID --value puppetserver)"
+            printf '%s\n' '=== PROCESS CONFIG ARGUMENTS ==='
+            tr '\0' '\n' < "/proc/$pid/cmdline" | grep -A 1 -E '^--config$|^--bootstrap-config$' || true
+            printf '%s\n' '=== POLICY FILE ==='
+            cat /etc/puppetlabs/puppetserver/conf.d/ca.conf
+            printf '%s\n' '=== SERVICE ==='
+            systemctl is-active puppetserver
+          args:
+            executable: /bin/bash
+          register: runtime_diagnostics
+          changed_when: false
+
+        - name: Display runtime diagnostics
+          ansible.builtin.debug:
+            var: runtime_diagnostics.stdout_lines
+
+        - name: Show recent CA configuration and extension errors
+          ansible.builtin.shell: |
+            grep -iE 'allow-authorization-extensions|allow-subject-alt-names|disallowed-extension|certificate-authority-service|CA service' \
+              /var/log/puppetlabs/puppetserver/puppetserver.log | tail -n 45 || true
+          register: ca_log_diagnostics
+          changed_when: false
+
+        - name: Display CA log diagnostics
+          ansible.builtin.debug:
+            var: ca_log_diagnostics.stdout_lines
+
+      always:
+        - name: Check saved policy for restoration
+          ansible.builtin.stat:
+            path: "{{ openvox_ca_backup }}"
+          register: saved_policy
+          check_mode: false
+
+        - name: Restore original policy
+          ansible.builtin.copy:
+            src: "{{ openvox_ca_backup }}"
+            dest: "{{ openvox_ca_conf }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: '0644'
+          when: saved_policy.stat.exists
+          register: restore_result
+
+        - name: Restart CA with original policy
+          ansible.builtin.systemd_service:
+            name: puppetserver
+            state: restarted
+          when: saved_policy.stat.exists
+
+        - name: Wait for restored CA listener
+          ansible.builtin.wait_for:
+            host: 127.0.0.1
+            port: 8140
+            delay: 3
+            timeout: 180
+          when: saved_policy.stat.exists
+
+        - name: Confirm restored CA API responds
+          ansible.builtin.command:
+            argv:
+              - /opt/puppetlabs/bin/puppetserver
+              - ca
+              - list
+              - --all
+              - --config
+              - "{{ openvox_ca_puppet_conf }}"
+          register: restored_api
+          changed_when: false
+          retries: 12
+          delay: 10
+          until: restored_api.rc == 0
+          when: saved_policy.stat.exists
+
+        - name: Remove recovery backup after successful restoration
+          ansible.builtin.file:
+            path: "{{ openvox_ca_backup }}"
+            state: absent
+          when:
+            - saved_policy.stat.exists
+            - restore_result is succeeded
+            - restored_api is succeeded
+
+    - name: Diagnostic run completed without signing
+      ansible.builtin.debug:
+        msg: 'Temporary CA policy was restored. No certificate was signed.'
+      when: not ansible_check_mode

@@ -1,0 +1,13 @@
+---
+nfs_ca_device: /dev/vdb
+nfs_ca_mount: /srv/nfs
+nfs_ca_export: /srv/nfs/openvox-ca
+nfs_ca_clients:
+  - 192.168.122.92
+  - 192.168.122.16
+# Safety: never format a disk unless explicitly enabled after verification.
+nfs_ca_allow_format: false
+# Set these to the numeric UID/GID of the puppet service on ca01 and ca02
+# before CA data migration. Do not guess numeric identities.
+nfs_ca_owner_uid: null
+nfs_ca_owner_gid: null

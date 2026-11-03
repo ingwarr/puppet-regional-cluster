@@ -1,0 +1,183 @@
+---
+# Run from the ansible directory; helper must be alongside this playbook.
+# Lab-only: ca01.lab.example, fixed paths and certificate name.
+- name: Preflight both CA nodes (no service changes)
+  hosts: ca
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Check puppetserver is masked and inactive
+      ansible.builtin.shell: |
+        set -eu
+        test "$(systemctl is-enabled puppetserver.service)" = masked
+        test "$(systemctl is-active puppetserver.service || true)" != active
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+
+    - name: Confirm expected Puppet CLI paths as puppet
+      ansible.builtin.command:
+        argv:
+          - /opt/puppetlabs/bin/puppet
+          - config
+          - print
+          - cadir
+          - ssldir
+          - --section
+          - server
+          - --config
+          - /etc/puppetlabs/puppet/puppet.conf
+      become_user: puppet
+      register: paths
+      changed_when: false
+      check_mode: false
+
+    - name: Require explicit CA and SSL paths
+      ansible.builtin.assert:
+        that:
+          - "'cadir = /etc/puppetlabs/puppetserver/ca' in paths.stdout_lines"
+          - "'ssldir = /etc/puppetlabs/puppet/ssl' in paths.stdout_lines"
+
+    - name: Check CA directory is mounted from expected NFS export
+      ansible.builtin.shell: |
+        set -eu
+        test "$(findmnt -n -o SOURCE --target /srv/openvox-ca)" = '192.168.122.163:/srv/nfs/openvox-ca'
+        findmnt -n -o FSTYPE --target /srv/openvox-ca | grep -Eq '^nfs4?$'
+        test "$(readlink -f /etc/puppetlabs/puppetserver/ca)" = /srv/openvox-ca
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+
+- name: Safely copy existing PKI from ca01 (no deletion or service start)
+  hosts: ca01
+  become: true
+  gather_facts: false
+  vars:
+    backup_dir: /var/backups/openvox-ca/38c-original
+    src_ca: /opt/puppetlabs/server/data/puppetserver/.puppetlabs/etc/puppetserver/ca
+    src_ssl: /opt/puppetlabs/server/data/puppetserver/.puppetlabs/etc/puppet/ssl
+  tasks:
+    - name: Require explicit confirmation for non-check run
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or (openvox_ca_relocate_confirm | default(false) | bool)
+        fail_msg: 'Use --check for read-only preflight, or -e openvox_ca_relocate_confirm=true to copy.'
+
+    - name: Verify signing CA key matches signing CA certificate
+      ansible.builtin.shell: |
+        set -euo pipefail
+        crt="$(openssl x509 -in '{{ src_ca }}/ca_crt.pem' -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum | cut -d' ' -f1)"
+        key="$(openssl pkey -in '{{ src_ca }}/ca_key.pem' -pubout -outform DER | sha256sum | cut -d' ' -f1)"
+        test "$crt" = "$key"
+        openssl x509 -in '{{ src_ca }}/ca_crt.pem' -noout -checkend 0 >/dev/null
+        openssl x509 -in '{{ src_ssl }}/certs/ca01.lab.example.pem' -noout -checkend 0 >/dev/null
+        srvcrt="$(openssl x509 -in '{{ src_ssl }}/certs/ca01.lab.example.pem' -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum | cut -d' ' -f1)"
+        srvkey="$(openssl pkey -in '{{ src_ssl }}/private_keys/ca01.lab.example.pem' -pubout -outform DER | sha256sum | cut -d' ' -f1)"
+        test "$srvcrt" = "$srvkey"
+        openssl crl -in '{{ src_ca }}/ca_crl.pem' -noout >/dev/null
+        openssl crl -in '{{ src_ca }}/infra_crl.pem' -noout >/dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Check target contents and source completeness as puppet
+      ansible.builtin.script: "{{ playbook_dir }}/38c-openvox-ca-relocate.py --mode preflight"
+      become_user: puppet
+      register: relocation_state
+      changed_when: false
+      check_mode: false
+
+    - name: Display relocation state
+      ansible.builtin.debug:
+        msg: "{{ relocation_state.stdout | trim }}"
+
+    - name: Create protected backup parent
+      ansible.builtin.file:
+        path: /var/backups/openvox-ca
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+      when: not ansible_check_mode and 'READY_EMPTY_TARGETS' in relocation_state.stdout
+
+    - name: Check whether backup already exists
+      ansible.builtin.stat:
+        path: "{{ backup_dir }}"
+      register: backup_stat
+      check_mode: false
+
+    - name: Copy source CA and SSL to protected local backup
+      ansible.builtin.shell: |
+        set -euo pipefail
+        umask 077
+        backup='{{ backup_dir }}'
+        test ! -e "$backup" || { echo 'Backup already exists; refusing overwrite'; exit 1; }
+        mkdir -m 0700 "$backup"
+        cp -a '{{ src_ca }}' "$backup/ca"
+        cp -a '{{ src_ssl }}' "$backup/ssl"
+        diff -qr '{{ src_ca }}' "$backup/ca" >/dev/null
+        diff -qr '{{ src_ssl }}' "$backup/ssl" >/dev/null
+        chmod 0700 "$backup"
+      args:
+        executable: /bin/bash
+      when:
+        - not ansible_check_mode
+        - "'READY_EMPTY_TARGETS' in relocation_state.stdout"
+        - not backup_stat.stat.exists
+      no_log: true
+
+    - name: Verify existing backup matches source before any copy
+      ansible.builtin.shell: |
+        set -euo pipefail
+        test -d '{{ backup_dir }}/ca'
+        test -d '{{ backup_dir }}/ssl'
+        diff -qr '{{ src_ca }}' '{{ backup_dir }}/ca' >/dev/null
+        diff -qr '{{ src_ssl }}' '{{ backup_dir }}/ssl' >/dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+      when:
+        - not ansible_check_mode
+        - "'READY_EMPTY_TARGETS' in relocation_state.stdout"
+      no_log: true
+
+    - name: Copy and verify PKI as puppet (only after backup)
+      ansible.builtin.script: "{{ playbook_dir }}/38c-openvox-ca-relocate.py --mode copy --confirm"
+      become_user: puppet
+      register: copy_result
+      changed_when: "'COPY_VERIFIED' in copy_result.stdout"
+      when:
+        - not ansible_check_mode
+        - "'READY_EMPTY_TARGETS' in relocation_state.stdout"
+      no_log: true
+
+    - name: Verify target trees against original trees
+      ansible.builtin.script: "{{ playbook_dir }}/38c-openvox-ca-relocate.py --mode verify"
+      become_user: puppet
+      changed_when: false
+      check_mode: false
+      when: not ansible_check_mode or 'ALREADY_COPIED_AND_VERIFIED' in relocation_state.stdout
+
+- name: Confirm shared CA files visible on ca02 after relocation
+  hosts: ca02
+  become: true
+  become_user: puppet
+  gather_facts: false
+  tasks:
+    - name: Check signing CA certificate and key readable on standby
+      ansible.builtin.shell: |
+        set -eu
+        test -r /srv/openvox-ca/ca_crt.pem
+        test -r /srv/openvox-ca/ca_key.pem
+        test -r /srv/openvox-ca/root_key.pem
+        openssl x509 -in /srv/openvox-ca/ca_crt.pem -noout >/dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+      when: not ansible_check_mode

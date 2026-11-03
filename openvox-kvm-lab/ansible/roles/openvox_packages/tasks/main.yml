@@ -1,0 +1,157 @@
+---
+- name: Validate supported platform and OpenVox series
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.os_family == 'RedHat'
+      - ansible_facts.distribution_major_version == '9'
+      - openvox_major_version | int == 8
+      - openvox_service_uid | int >= 1000
+      - openvox_service_gid | int >= 1000
+
+- name: Inspect account and numeric ID reservations
+  ansible.builtin.getent:
+    database: passwd
+    fail_key: false
+  register: ov_passwd
+
+- name: Inspect groups and numeric ID reservations
+  ansible.builtin.getent:
+    database: group
+    fail_key: false
+  register: ov_groups
+
+- name: Reject conflicting UID or GID assignments
+  ansible.builtin.assert:
+    that:
+      - (ansible_facts.getent_passwd.get(openvox_service_user) is none) or (ansible_facts.getent_passwd[openvox_service_user][1] | int == openvox_service_uid | int)
+      - (ansible_facts.getent_group.get(openvox_service_group) is none) or (ansible_facts.getent_group[openvox_service_group][1] | int == openvox_service_gid | int)
+      - (ansible_facts.getent_passwd | dict2items | selectattr('value.1', 'equalto', openvox_service_uid | string) | map(attribute='key') | list | difference([openvox_service_user]) | length) == 0
+      - (ansible_facts.getent_group | dict2items | selectattr('value.1', 'equalto', openvox_service_gid | string) | map(attribute='key') | list | difference([openvox_service_group]) | length) == 0
+    fail_msg: 'Service UID/GID conflict; inspect getent passwd/group before proceeding.'
+
+- name: Create consistent puppet group
+  ansible.builtin.group:
+    name: '{{ openvox_service_group }}'
+    gid: '{{ openvox_service_gid }}'
+    state: present
+
+- name: Create consistent puppet service account
+  ansible.builtin.user:
+    name: '{{ openvox_service_user }}'
+    uid: '{{ openvox_service_uid }}'
+    group: '{{ openvox_service_group }}'
+    home: /opt/puppetlabs/server/data/puppetserver
+    create_home: false
+    shell: /sbin/nologin
+    system: true
+    state: present
+
+- name: Mask puppetserver before package installation
+  ansible.builtin.file:
+    src: /dev/null
+    dest: /etc/systemd/system/puppetserver.service
+    state: link
+    force: false
+
+- name: Reload systemd to recognize pre-install service mask
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: not ansible_check_mode
+
+- name: Configure OpenVox 8 repository
+  ansible.builtin.yum_repository:
+    name: openvox8
+    description: OpenVox 8 for Enterprise Linux 9
+    baseurl: "https://yum.voxpupuli.org/openvox8/el/9/$basearch"
+    enabled: true
+    gpgcheck: true
+    gpgkey: "https://yum.voxpupuli.org/GPG-KEY-openvox.pub"
+    state: present
+    
+- name: Download OpenVox signing key
+  ansible.builtin.get_url:
+    url: https://yum.voxpupuli.org/GPG-KEY-openvox.pub
+    dest: /etc/pki/rpm-gpg/GPG-KEY-openvox
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Read OpenVox signing key fingerprint
+  ansible.builtin.command:
+    argv:
+      - gpg
+      - --show-keys
+      - --with-colons
+      - /etc/pki/rpm-gpg/GPG-KEY-openvox
+  register: openvox_key_info
+  changed_when: false
+  check_mode: false
+
+- name: Verify OpenVox signing key fingerprint
+  ansible.builtin.assert:
+    that:
+      - "'0E26429987002418F9513F2A5FB999C2D62FF3D9' in openvox_key_info.stdout"
+    fail_msg: "Unexpected OpenVox signing key fingerprint."
+
+- name: Import verified OpenVox signing key
+  ansible.builtin.rpm_key:
+    key: /etc/pki/rpm-gpg/GPG-KEY-openvox
+    state: present
+
+- name: Verify OpenVox 8 repository is configured
+  ansible.builtin.command:
+    argv:
+      - dnf
+      - repolist
+      - --enabled
+  register: openvox_repos
+  changed_when: false
+  check_mode: false
+
+- name: Require OpenVox 8 repository
+  ansible.builtin.assert:
+    that:
+      - "'openvox8' in openvox_repos.stdout"
+    fail_msg: "OpenVox 8 repository is not enabled."
+
+- name: Verify OpenVox Server package availability
+  ansible.builtin.command:
+    argv:
+      - dnf
+      - --disablerepo=*
+      - --enablerepo=openvox8
+      - list
+      - --showduplicates
+      - openvox-server
+  register: openvox_package_check
+  changed_when: false
+  check_mode: false
+
+- name: Install OpenVox Server 8 without upgrading existing packages
+  ansible.builtin.dnf:
+    name: openvox-server
+    state: present
+    enablerepo: openvox8
+    update_cache: true
+
+- name: Read service user numeric IDs
+  ansible.builtin.command: 'id -u {{ openvox_service_user }}'
+  register: ov_uid
+  changed_when: false
+  check_mode: false
+
+- name: Read service group numeric ID
+  ansible.builtin.command: 'id -g {{ openvox_service_user }}'
+  register: ov_gid
+  changed_when: false
+  check_mode: false
+
+- name: Verify installed identity
+  ansible.builtin.assert:
+    that:
+      - ov_uid.stdout | int == openvox_service_uid | int
+      - ov_gid.stdout | int == openvox_service_gid | int
+
+- name: Display verified service identity
+  ansible.builtin.debug:
+    msg: 'Service account {{ openvox_service_user }} UID={{ ov_uid.stdout }} GID={{ ov_gid.stdout }}; puppetserver remains masked.'

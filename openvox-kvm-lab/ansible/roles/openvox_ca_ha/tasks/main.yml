@@ -1,0 +1,63 @@
+---
+- name: Validate supported HA action
+  ansible.builtin.assert:
+    that:
+      - openvox_ca_ha_action in ['inspect', 'stop']
+      - openvox_ca_ha_nodes | length == 2
+    fail_msg: 'Only inspect/stop supported; activation requires independent fencing integration.'
+
+- name: Inspect service state
+  ansible.builtin.command:
+    argv: [systemctl, is-active, '{{ openvox_ca_ha_service }}']
+  register: ca_service_active
+  changed_when: false
+  failed_when: ca_service_active.rc not in [0, 3, 4]
+  check_mode: false
+
+- name: Inspect service enablement
+  ansible.builtin.command:
+    argv: [systemctl, is-enabled, '{{ openvox_ca_ha_service }}']
+  register: ca_service_enabled
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Inspect shared mount
+  ansible.builtin.command:
+    argv:
+      - findmnt
+      - --mountpoint
+      - '{{ openvox_ca_ha_mount }}'
+      - --noheadings
+      - --output
+      - SOURCE,FSTYPE
+  register: ca_ha_mount
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Validate expected shared mount
+  ansible.builtin.assert:
+    that:
+      - ca_ha_mount.rc == 0
+      - ca_ha_mount.stdout.split() | length == 2
+      - ca_ha_mount.stdout.split()[0] == openvox_ca_ha_expected_source
+      - ca_ha_mount.stdout.split()[1] in ['nfs', 'nfs4']
+    fail_msg: 'Unexpected/missing shared CA storage; refusing HA operations.'
+
+- name: Show local HA status
+  ansible.builtin.debug:
+    msg:
+      node: '{{ inventory_hostname }}'
+      service_state: '{{ ca_service_active.stdout }}'
+      service_enablement: '{{ ca_service_enabled.stdout }}'
+      mount: '{{ ca_ha_mount.stdout }}'
+      action: '{{ openvox_ca_ha_action }}'
+
+- name: Stop and mask CA service when explicitly requested
+  ansible.builtin.systemd_service:
+    name: '{{ openvox_ca_ha_service }}'
+    state: stopped
+    enabled: false
+    masked: true
+  when: openvox_ca_ha_action == 'stop'
